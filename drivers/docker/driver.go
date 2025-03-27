@@ -68,6 +68,13 @@ var (
 )
 
 const (
+	// CPU shares limits are defined by the Linux kernel.
+	// https://github.com/torvalds/linux/blob/0dd3ee31125508cd67f7e7172247f05b7fd1753a/kernel/sched/sched.h#L409-L418
+	MinCPUShares = 2
+	MaxCPUShares = 262_144
+)
+
+const (
 	dockerLabelAllocID       = "com.hashicorp.nomad.alloc_id"
 	dockerLabelJobName       = "com.hashicorp.nomad.job_name"
 	dockerLabelJobID         = "com.hashicorp.nomad.job_id"
@@ -987,13 +994,15 @@ func (d *Driver) createContainerConfig(task *drivers.TaskConfig, driverConfig *T
 		pidsLimit = driverConfig.PidsLimit
 	}
 
+	cpuShares := d.clampCpuShares(task.Resources.LinuxResources.CPUShares)
+
 	hostConfig := &docker.HostConfig{
 		// do not set cgroup parent anymore
 
 		Memory:            memory,            // hard limit
 		MemoryReservation: memoryReservation, // soft limit
 
-		CPUShares:  task.Resources.LinuxResources.CPUShares,
+		CPUShares:  cpuShares,
 		CPUSetCPUs: task.Resources.LinuxResources.CpusetCpus,
 
 		// Binds are used to mount a host volume into the container. We mount a
@@ -1940,4 +1949,22 @@ func isDockerTransientError(err error) bool {
 	}
 
 	return false
+}
+
+func (d *Driver) clampCpuShares(shares int64) int64 {
+	if shares < MinCPUShares {
+		d.logger.Warn(
+			"task CPU is lower than minimum allowed, using minimum value instead",
+			"task_cpu", shares, "min", MinCPUShares,
+		)
+		return MinCPUShares
+	}
+	if shares > MaxCPUShares {
+		d.logger.Warn(
+			"task CPU is greater than maximum allowed, using maximum value instead",
+			"task_cpu", shares, "max", MaxCPUShares,
+		)
+		return MaxCPUShares
+	}
+	return shares
 }
