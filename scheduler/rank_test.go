@@ -2334,3 +2334,217 @@ func TestNodeAffinityIterator(t *testing.T) {
 	}
 
 }
+
+// TestBinPackIterator_GPUScheduling tests that GPU jobs use binpack strategy
+// and non-GPU jobs use spread strategy when binpacking is enabled
+func TestBinPackIterator_GPUScheduling(t *testing.T) {
+	_, ctx := testContext(t)
+
+	// Create a simple task group with GPU device
+	gpuTaskGroup := &structs.TaskGroup{
+		Name: "gpu-group",
+		Tasks: []*structs.Task{
+			{
+				Name: "gpu-task",
+				Resources: &structs.Resources{
+					CPU:      1000,
+					MemoryMB: 512,
+					Devices: []*structs.RequestedDevice{
+						{
+							Name:  "nvidia/gpu",
+							Count: 1,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	// Create a simple task group without GPU device
+	nonGPUTaskGroup := &structs.TaskGroup{
+		Name: "cpu-group",
+		Tasks: []*structs.Task{
+			{
+				Name: "cpu-task",
+				Resources: &structs.Resources{
+					CPU:      1000,
+					MemoryMB: 512,
+				},
+			},
+		},
+	}
+
+	// Create binpack config
+	schedConfig := &structs.SchedulerConfiguration{
+		SchedulerAlgorithm: structs.SchedulerAlgorithmBinpack,
+	}
+
+	// Test GPU task group uses binpack
+	static := NewStaticRankIterator(ctx, nil)
+	binp := NewBinPackIterator(ctx, static, false, 0)
+	binp.SetSchedulerConfiguration(schedConfig)
+	binp.SetTaskGroup(gpuTaskGroup)
+
+	// Test that it's using binpack by checking the scheduler algorithm
+	require.Equal(t, structs.SchedulerAlgorithmBinpack, binp.schedulerAlgorithm)
+
+	// Test non-GPU task group uses spread
+	static2 := NewStaticRankIterator(ctx, nil)
+	binp2 := NewBinPackIterator(ctx, static2, false, 0)
+	binp2.SetSchedulerConfiguration(schedConfig)
+	binp2.SetTaskGroup(nonGPUTaskGroup)
+
+	// Test that it's using binpack config but should override to spread for non-GPU
+	require.Equal(t, structs.SchedulerAlgorithmBinpack, binp2.schedulerAlgorithm)
+
+	// The actual test: create a node and score it to see which algorithm is used
+	// We'll compare scores - binpack and spread should produce different scores
+	testNode := mock.Node()
+
+	testUtil := &structs.ComparableResources{
+		Flattened: structs.AllocatedTaskResources{
+			Cpu: structs.AllocatedCpuResources{
+				CpuShares: 1000,
+			},
+			Memory: structs.AllocatedMemoryResources{
+				MemoryMB: 512,
+			},
+		},
+	}
+
+	// Score using the GPU iterator (should use binpack)
+	gpuScore := binp.scoreFit(testNode, testUtil)
+
+	// Score using the non-GPU iterator (should use spread)
+	nonGPUScore := binp2.scoreFit(testNode, testUtil)
+
+	// Binpack and spread produce different scores for the same utilization
+	binpackDirectScore := structs.ScoreFitBinPack(testNode, testUtil)
+	spreadDirectScore := structs.ScoreFitSpread(testNode, testUtil)
+
+	// GPU job should match binpack score
+	require.Equal(t, binpackDirectScore, gpuScore)
+
+	// Non-GPU job should match spread score
+	require.Equal(t, spreadDirectScore, nonGPUScore)
+
+	// They should be different
+	require.NotEqual(t, gpuScore, nonGPUScore)
+}
+
+// TestTaskGroupUsesGPU tests the GPU detection helper function
+func TestTaskGroupUsesGPU(t *testing.T) {
+	tests := []struct {
+		name     string
+		tg       *structs.TaskGroup
+		expected bool
+	}{
+		{
+			name:     "nil task group",
+			tg:       nil,
+			expected: false,
+		},
+		{
+			name: "task group with nvidia GPU",
+			tg: &structs.TaskGroup{
+				Tasks: []*structs.Task{
+					{
+						Resources: &structs.Resources{
+							Devices: []*structs.RequestedDevice{
+								{Name: "nvidia/gpu"},
+							},
+						},
+					},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "task group with generic GPU",
+			tg: &structs.TaskGroup{
+				Tasks: []*structs.Task{
+					{
+						Resources: &structs.Resources{
+							Devices: []*structs.RequestedDevice{
+								{Name: "gpu"},
+							},
+						},
+					},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "task group with AMD GPU",
+			tg: &structs.TaskGroup{
+				Tasks: []*structs.Task{
+					{
+						Resources: &structs.Resources{
+							Devices: []*structs.RequestedDevice{
+								{Name: "amd/gpu/vega64"},
+							},
+						},
+					},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "task group with FPGA (no GPU)",
+			tg: &structs.TaskGroup{
+				Tasks: []*structs.Task{
+					{
+						Resources: &structs.Resources{
+							Devices: []*structs.RequestedDevice{
+								{Name: "xilinx/fpga"},
+							},
+						},
+					},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "task group without devices",
+			tg: &structs.TaskGroup{
+				Tasks: []*structs.Task{
+					{
+						Resources: &structs.Resources{
+							CPU:      1000,
+							MemoryMB: 512,
+						},
+					},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "task group with multiple tasks, one has GPU",
+			tg: &structs.TaskGroup{
+				Tasks: []*structs.Task{
+					{
+						Resources: &structs.Resources{
+							CPU:      1000,
+							MemoryMB: 512,
+						},
+					},
+					{
+						Resources: &structs.Resources{
+							Devices: []*structs.RequestedDevice{
+								{Name: "nvidia/gpu/rtx3090"},
+							},
+						},
+					},
+				},
+			},
+			expected: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := taskGroupUsesGPU(tc.tg)
+			require.Equal(t, tc.expected, result)
+		})
+	}
+}
