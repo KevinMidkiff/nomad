@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"strings"
 
 	"github.com/hashicorp/go-set/v3"
 	"github.com/hashicorp/nomad/client/lib/idset"
@@ -166,6 +167,7 @@ type BinPackIterator struct {
 	taskGroup              *structs.TaskGroup
 	memoryOversubscription bool
 	scoreFit               func(*structs.Node, *structs.ComparableResources) float64
+	schedulerAlgorithm     structs.SchedulerAlgorithm
 }
 
 // NewBinPackIterator returns a BinPackIterator which tries to fit tasks
@@ -191,11 +193,23 @@ func (iter *BinPackIterator) SetJob(job *structs.Job) {
 
 func (iter *BinPackIterator) SetTaskGroup(taskGroup *structs.TaskGroup) {
 	iter.taskGroup = taskGroup
+
+	// When binpacking is enabled, override to use spread for non-GPU jobs
+	if iter.schedulerAlgorithm == structs.SchedulerAlgorithmBinpack && taskGroup != nil {
+		if taskGroupUsesGPU(taskGroup) {
+			iter.scoreFit = structs.ScoreFitBinPack
+		} else {
+			iter.scoreFit = structs.ScoreFitSpread
+		}
+	}
 }
 
 func (iter *BinPackIterator) SetSchedulerConfiguration(schedConfig *structs.SchedulerConfiguration) {
-	// Set scoring function.
+	// Store the algorithm so we can use it in SetTaskGroup
 	algorithm := schedConfig.EffectiveSchedulerAlgorithm()
+	iter.schedulerAlgorithm = algorithm
+
+	// Set default scoring function based on algorithm
 	scoreFn := structs.ScoreFitBinPack
 	if algorithm == structs.SchedulerAlgorithmSpread {
 		scoreFn = structs.ScoreFitSpread
@@ -1094,4 +1108,27 @@ func preemptionScore(netPriority float64) float64 {
 
 	// This function manifests as an s curve that asympotically moves towards zero for large values of netPriority
 	return 1.0 / (1 + math.Exp(rate*(netPriority-origin)))
+}
+
+// taskGroupUsesGPU checks if any task in the task group requests a device
+
+// that has "gpu" in its name (case-insensitive).
+
+func taskGroupUsesGPU(tg *structs.TaskGroup) bool {
+	if tg == nil {
+		return false
+	}
+
+	for _, task := range tg.Tasks {
+		if task.Resources == nil {
+			continue
+		}
+		for _, device := range task.Resources.Devices {
+			if device != nil && strings.Contains(strings.ToLower(device.Name), "gpu") {
+				return true
+			}
+		}
+	}
+
+	return false
 }

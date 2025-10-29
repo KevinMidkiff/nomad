@@ -2513,3 +2513,120 @@ func TestNodeAffinityIterator(t *testing.T) {
 		test.Less(t, out[3].FinalScore, out[4].FinalScore)
 	})
 }
+
+// TestTaskGroupUsesGPU tests the GPU detection helper function
+func TestTaskGroupUsesGPU(t *testing.T) {
+	tests := []struct {
+		name     string
+		tg       *structs.TaskGroup
+		expected bool
+	}{
+		{
+			name:     "nil task group",
+			tg:       nil,
+			expected: false,
+		},
+		{
+			name: "task group with nvidia GPU",
+			tg: &structs.TaskGroup{
+				Tasks: []*structs.Task{
+					{
+						Resources: &structs.Resources{
+							Devices: []*structs.RequestedDevice{
+								{Name: "nvidia/gpu"},
+							},
+						},
+					},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "task group with generic GPU",
+			tg: &structs.TaskGroup{
+				Tasks: []*structs.Task{
+					{
+						Resources: &structs.Resources{
+							Devices: []*structs.RequestedDevice{
+								{Name: "gpu"},
+							},
+						},
+					},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "task group with AMD GPU",
+			tg: &structs.TaskGroup{
+				Tasks: []*structs.Task{
+					{
+						Resources: &structs.Resources{
+							Devices: []*structs.RequestedDevice{
+								{Name: "amd/gpu/vega64"},
+							},
+						},
+					},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "task group with FPGA (no GPU)",
+			tg: &structs.TaskGroup{
+				Tasks: []*structs.Task{
+					{
+						Resources: &structs.Resources{
+							Devices: []*structs.RequestedDevice{
+								{Name: "xilinx/fpga"},
+							},
+						},
+					},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "task group without devices",
+			tg: &structs.TaskGroup{
+				Tasks: []*structs.Task{
+					{
+						Resources: &structs.Resources{
+							CPU:      1000,
+							MemoryMB: 512,
+						},
+					},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "task group with multiple tasks, one has GPU",
+			tg: &structs.TaskGroup{
+				Tasks: []*structs.Task{
+					{
+						Resources: &structs.Resources{
+							CPU:      1000,
+							MemoryMB: 512,
+						},
+					},
+					{
+						Resources: &structs.Resources{
+							Devices: []*structs.RequestedDevice{
+								{Name: "nvidia/gpu/rtx3090"},
+							},
+						},
+					},
+				},
+			},
+			expected: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := taskGroupUsesGPU(tc.tg)
+			test.Eq(t, tc.expected, result)
+		})
+	}
+}
