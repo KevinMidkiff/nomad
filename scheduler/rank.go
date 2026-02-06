@@ -194,9 +194,10 @@ func (iter *BinPackIterator) SetJob(job *structs.Job) {
 func (iter *BinPackIterator) SetTaskGroup(taskGroup *structs.TaskGroup) {
 	iter.taskGroup = taskGroup
 
-	// When binpacking is enabled, override to use spread for non-GPU jobs
+	// When binpacking is enabled, override to use spread for jobs without a GPU or
+	// with specific GPUs
 	if iter.schedulerAlgorithm == structs.SchedulerAlgorithmBinpack && taskGroup != nil {
-		if taskGroupUsesGPU(taskGroup) {
+		if taskGroupUsesGPU(taskGroup) && !taskGroupUsesSpreadGPU(taskGroup) {
 			iter.scoreFit = structs.ScoreFitBinPack
 		} else {
 			iter.scoreFit = structs.ScoreFitSpread
@@ -1111,9 +1112,7 @@ func preemptionScore(netPriority float64) float64 {
 }
 
 // taskGroupUsesGPU checks if any task in the task group requests a device
-
 // that has "gpu" in its name (case-insensitive).
-
 func taskGroupUsesGPU(tg *structs.TaskGroup) bool {
 	if tg == nil {
 		return false
@@ -1125,6 +1124,61 @@ func taskGroupUsesGPU(tg *structs.TaskGroup) bool {
 		}
 		for _, device := range task.Resources.Devices {
 			if device != nil && strings.Contains(strings.ToLower(device.Name), "gpu") {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// spreadEligibleGPUs contains GPU model substrings that should use the spread algorithm.
+var spreadEligibleGPUs = []string{"a100", "l40", "4090", "5090"}
+
+// taskGroupUsesSpreadGPU checks if any task in the task group requests a GPU device
+// that should use the spread algorithm. It checks the first constraint's RTarget and
+// returns true only if ALL comma-separated values contain a spread-eligible GPU model
+// (case-insensitive).
+func taskGroupUsesSpreadGPU(tg *structs.TaskGroup) bool {
+	if tg == nil {
+		return false
+	}
+
+	for _, task := range tg.Tasks {
+		if task.Resources == nil {
+			continue
+		}
+		for _, device := range task.Resources.Devices {
+			if device == nil {
+				continue
+			}
+			if !strings.Contains(strings.ToLower(device.Name), "gpu") {
+				continue
+			}
+			if len(device.Constraints) == 0 || device.Constraints[0] == nil {
+				continue
+			}
+			rTarget := device.Constraints[0].RTarget
+			if rTarget == "" {
+				continue
+			}
+			values := strings.Split(rTarget, ",")
+			allSpreadEligible := true
+			for _, v := range values {
+				vLower := strings.ToLower(v)
+				eligible := false
+				for _, gpu := range spreadEligibleGPUs {
+					if strings.Contains(vLower, gpu) {
+						eligible = true
+						break
+					}
+				}
+				if !eligible {
+					allSpreadEligible = false
+					break
+				}
+			}
+			if allSpreadEligible {
 				return true
 			}
 		}

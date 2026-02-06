@@ -2630,3 +2630,358 @@ func TestTaskGroupUsesGPU(t *testing.T) {
 		})
 	}
 }
+
+// TestTaskGroupUsesSpreadGPU tests the spread-eligible GPU detection helper function
+func TestTaskGroupUsesSpreadGPU(t *testing.T) {
+	tests := []struct {
+		name     string
+		tg       *structs.TaskGroup
+		expected bool
+	}{
+		{
+			name:     "nil task group",
+			tg:       nil,
+			expected: false,
+		},
+		{
+			name: "task group with A100 in first constraint",
+			tg: &structs.TaskGroup{
+				Tasks: []*structs.Task{
+					{
+						Resources: &structs.Resources{
+							Devices: []*structs.RequestedDevice{
+								{
+									Name: "nvidia/gpu",
+									Constraints: structs.Constraints{
+										{
+											LTarget: "${device.model}",
+											Operand: "set_contains_any",
+											RTarget: "NVIDIA A100 80GB PCIe,NVIDIA A100 40GB",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "task group with L40 in first constraint",
+			tg: &structs.TaskGroup{
+				Tasks: []*structs.Task{
+					{
+						Resources: &structs.Resources{
+							Devices: []*structs.RequestedDevice{
+								{
+									Name: "nvidia/gpu",
+									Constraints: structs.Constraints{
+										{
+											LTarget: "${device.model}",
+											Operand: "set_contains_any",
+											RTarget: "NVIDIA L40,NVIDIA L40S",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "task group with mixed A100 and L40 in constraint",
+			tg: &structs.TaskGroup{
+				Tasks: []*structs.Task{
+					{
+						Resources: &structs.Resources{
+							Devices: []*structs.RequestedDevice{
+								{
+									Name: "nvidia/gpu",
+									Constraints: structs.Constraints{
+										{
+											LTarget: "${device.model}",
+											Operand: "set_contains_any",
+											RTarget: "NVIDIA A100 80GB PCIe,NVIDIA L40S",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "task group with A100 lowercase in constraint",
+			tg: &structs.TaskGroup{
+				Tasks: []*structs.Task{
+					{
+						Resources: &structs.Resources{
+							Devices: []*structs.RequestedDevice{
+								{
+									Name: "nvidia/gpu",
+									Constraints: structs.Constraints{
+										{
+											LTarget: "${device.model}",
+											Operand: "=",
+											RTarget: "nvidia a100",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "task group with L40 lowercase in constraint",
+			tg: &structs.TaskGroup{
+				Tasks: []*structs.Task{
+					{
+						Resources: &structs.Resources{
+							Devices: []*structs.RequestedDevice{
+								{
+									Name: "nvidia/gpu",
+									Constraints: structs.Constraints{
+										{
+											LTarget: "${device.model}",
+											Operand: "=",
+											RTarget: "nvidia l40s",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "task group with 4090 in constraint",
+			tg: &structs.TaskGroup{
+				Tasks: []*structs.Task{
+					{
+						Resources: &structs.Resources{
+							Devices: []*structs.RequestedDevice{
+								{
+									Name: "nvidia/gpu",
+									Constraints: structs.Constraints{
+										{
+											LTarget: "${device.model}",
+											Operand: "set_contains_any",
+											RTarget: "NVIDIA GeForce RTX 4090,NVIDIA RTX 4090",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "task group with 5090 in constraint",
+			tg: &structs.TaskGroup{
+				Tasks: []*structs.Task{
+					{
+						Resources: &structs.Resources{
+							Devices: []*structs.RequestedDevice{
+								{
+									Name: "nvidia/gpu",
+									Constraints: structs.Constraints{
+										{
+											LTarget: "${device.model}",
+											Operand: "=",
+											RTarget: "NVIDIA GeForce RTX 5090",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "task group with mixed 4090 and 5090 in constraint",
+			tg: &structs.TaskGroup{
+				Tasks: []*structs.Task{
+					{
+						Resources: &structs.Resources{
+							Devices: []*structs.RequestedDevice{
+								{
+									Name: "nvidia/gpu",
+									Constraints: structs.Constraints{
+										{
+											LTarget: "${device.model}",
+											Operand: "set_contains_any",
+											RTarget: "NVIDIA RTX 4090,NVIDIA RTX 5090",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "task group with H100 in constraint (not spread-eligible)",
+			tg: &structs.TaskGroup{
+				Tasks: []*structs.Task{
+					{
+						Resources: &structs.Resources{
+							Devices: []*structs.RequestedDevice{
+								{
+									Name: "nvidia/gpu",
+									Constraints: structs.Constraints{
+										{
+											LTarget: "${device.model}",
+											Operand: "set_contains_any",
+											RTarget: "NVIDIA H100 80GB HBM3,NVIDIA H100 PCIe",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "task group with mixed A100 and H100 in constraint",
+			tg: &structs.TaskGroup{
+				Tasks: []*structs.Task{
+					{
+						Resources: &structs.Resources{
+							Devices: []*structs.RequestedDevice{
+								{
+									Name: "nvidia/gpu",
+									Constraints: structs.Constraints{
+										{
+											LTarget: "${device.model}",
+											Operand: "set_contains_any",
+											RTarget: "NVIDIA A100 80GB PCIe,NVIDIA H100 PCIe",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "task group with mixed L40 and H100 in constraint",
+			tg: &structs.TaskGroup{
+				Tasks: []*structs.Task{
+					{
+						Resources: &structs.Resources{
+							Devices: []*structs.RequestedDevice{
+								{
+									Name: "nvidia/gpu",
+									Constraints: structs.Constraints{
+										{
+											LTarget: "${device.model}",
+											Operand: "set_contains_any",
+											RTarget: "NVIDIA L40S,NVIDIA H100 PCIe",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "task group with generic GPU no constraints",
+			tg: &structs.TaskGroup{
+				Tasks: []*structs.Task{
+					{
+						Resources: &structs.Resources{
+							Devices: []*structs.RequestedDevice{
+								{Name: "nvidia/gpu"},
+							},
+						},
+					},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "task group with FPGA with A100-like constraint (not GPU)",
+			tg: &structs.TaskGroup{
+				Tasks: []*structs.Task{
+					{
+						Resources: &structs.Resources{
+							Devices: []*structs.RequestedDevice{
+								{
+									Name: "xilinx/fpga",
+									Constraints: structs.Constraints{
+										{
+											LTarget: "${device.model}",
+											Operand: "=",
+											RTarget: "A100-fpga",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "task group with multiple tasks, one has A100 constraint",
+			tg: &structs.TaskGroup{
+				Tasks: []*structs.Task{
+					{
+						Resources: &structs.Resources{
+							CPU:      1000,
+							MemoryMB: 512,
+						},
+					},
+					{
+						Resources: &structs.Resources{
+							Devices: []*structs.RequestedDevice{
+								{
+									Name: "nvidia/gpu",
+									Constraints: structs.Constraints{
+										{
+											LTarget: "${device.model}",
+											Operand: "=",
+											RTarget: "NVIDIA A100 80GB PCIe",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expected: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := taskGroupUsesSpreadGPU(tc.tg)
+			test.Eq(t, tc.expected, result)
+		})
+	}
+}
