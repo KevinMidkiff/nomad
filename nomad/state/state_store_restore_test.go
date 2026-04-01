@@ -371,6 +371,7 @@ func TestStateStore_RestoreSchedulerConfig(t *testing.T) {
 		CreateIndex: 100,
 		ModifyIndex: 200,
 	}
+	schedConfig.Canonicalize()
 
 	restore, err := state.Restore()
 	must.NoError(t, err)

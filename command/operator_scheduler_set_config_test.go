@@ -41,9 +41,11 @@ func TestOperatorSchedulerSetConfig_Run(t *testing.T) {
 	// Modify every configuration parameter using the flags. This ensures the
 	// merging is working correctly and that operators can control the entire
 	// object via the CLI.
+	minAffinitySpreadScoreNodes := 200
 	modifyingArgs := []string{
 		"-address=" + addr,
 		"-scheduler-algorithm=spread",
+		"-min-affinity-spread-score-nodes=200",
 		"-pause-eval-broker=true",
 		"-memory-oversubscription=true",
 		"-reject-job-registration=true",
@@ -69,6 +71,7 @@ func TestOperatorSchedulerSetConfig_Run(t *testing.T) {
 		MemoryOversubscriptionEnabled: true,
 		RejectJobRegistration:         true,
 		PauseEvalBroker:               true,
+		MinAffinitySpreadScoreNodes:   &minAffinitySpreadScoreNodes,
 	}, modifiedConfig.SchedulerConfig)
 
 	ui.ErrorWriter.Reset()
@@ -104,6 +107,7 @@ func TestOperatorSchedulerSetConfig_Run(t *testing.T) {
 
 func schedulerConfigEquals(t *testing.T, expected, actual *api.SchedulerConfiguration) {
 	must.Eq(t, expected.SchedulerAlgorithm, actual.SchedulerAlgorithm)
+	must.Eq(t, expected.EffectiveMinAffinitySpreadScoreNodes(), actual.EffectiveMinAffinitySpreadScoreNodes())
 	must.Eq(t, expected.RejectJobRegistration, actual.RejectJobRegistration)
 	must.Eq(t, expected.MemoryOversubscriptionEnabled, actual.MemoryOversubscriptionEnabled)
 	must.Eq(t, expected.PauseEvalBroker, actual.PauseEvalBroker)

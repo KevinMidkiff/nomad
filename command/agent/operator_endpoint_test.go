@@ -484,6 +484,7 @@ func TestOperator_SchedulerGetConfiguration(t *testing.T) {
 		require.False(t, out.SchedulerConfig.PreemptionConfig.SysBatchSchedulerEnabled)
 		require.False(t, out.SchedulerConfig.PreemptionConfig.BatchSchedulerEnabled)
 		require.False(t, out.SchedulerConfig.PreemptionConfig.ServiceSchedulerEnabled)
+		require.Equal(t, 100, out.SchedulerConfig.EffectiveMinAffinitySpreadScoreNodes())
 		require.False(t, out.SchedulerConfig.MemoryOversubscriptionEnabled)
 		require.False(t, out.SchedulerConfig.PauseEvalBroker)
 	})
@@ -494,6 +495,7 @@ func TestOperator_SchedulerSetConfiguration(t *testing.T) {
 	httpTest(t, nil, func(s *TestAgent) {
 		body := bytes.NewBuffer([]byte(`
 {
+  "MinAffinitySpreadScoreNodes": 200,
   "MemoryOversubscriptionEnabled": true,
   "PauseEvalBroker": true,
   "PreemptionConfig": {
@@ -523,6 +525,7 @@ func TestOperator_SchedulerSetConfiguration(t *testing.T) {
 		require.False(t, reply.SchedulerConfig.PreemptionConfig.SysBatchSchedulerEnabled)
 		require.False(t, reply.SchedulerConfig.PreemptionConfig.BatchSchedulerEnabled)
 		require.True(t, reply.SchedulerConfig.PreemptionConfig.ServiceSchedulerEnabled)
+		require.Equal(t, 200, reply.SchedulerConfig.EffectiveMinAffinitySpreadScoreNodes())
 		require.True(t, reply.SchedulerConfig.MemoryOversubscriptionEnabled)
 		require.True(t, reply.SchedulerConfig.PauseEvalBroker)
 	})

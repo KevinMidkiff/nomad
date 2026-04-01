@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/hashicorp/nomad/ci"
+	"github.com/hashicorp/nomad/helper/pointer"
 	"github.com/hashicorp/nomad/nomad/mock"
 	"github.com/hashicorp/nomad/nomad/structs"
 	"github.com/shoenig/test/must"
@@ -125,6 +126,30 @@ func TestServiceStack_Select_Size(t *testing.T) {
 	if runtime.GOOS != "windows" && met.AllocationTime == 0 {
 		t.Fatalf("missing time")
 	}
+}
+
+func TestServiceStack_Select_UsesConfiguredAffinitySpreadMinimum(t *testing.T) {
+	ci.Parallel(t)
+
+	_, ctx := testContext(t)
+	stack := NewGenericStack(false, ctx)
+	stack.SetNodes([]*structs.Node{mock.Node()})
+	stack.SetSchedulerConfiguration(&structs.SchedulerConfiguration{
+		MinAffinitySpreadScoreNodes: pointer.Of(200),
+	})
+
+	job := mock.Job()
+	job.TaskGroups[0].Affinities = []*structs.Affinity{{
+		LTarget: "${node.datacenter}",
+		RTarget: "dc1",
+		Operand: "=",
+		Weight:  100,
+	}}
+	stack.SetJob(job)
+
+	option := stack.Select(job.TaskGroups[0], &SelectOptions{})
+	must.NotNil(t, option)
+	must.Eq(t, 200, stack.limit.limit)
 }
 
 func TestServiceStack_Select_PreferringNodes(t *testing.T) {

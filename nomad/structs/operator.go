@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/hashicorp/go-uuid"
+	"github.com/hashicorp/nomad/helper/pointer"
 	"github.com/hashicorp/raft"
 )
 
@@ -233,10 +234,18 @@ type SchedulerConfiguration struct {
 	// during leadership transitions.
 	PauseEvalBroker bool `hcl:"pause_eval_broker"`
 
+	// MinAffinitySpreadScoreNodes is the minimum number of nodes scored by the
+	// generic scheduler when a task group uses affinity or spread rules.
+	MinAffinitySpreadScoreNodes *int `hcl:"min_affinity_spread_score_nodes"`
+
 	// CreateIndex/ModifyIndex store the create/modify indexes of this configuration.
 	CreateIndex uint64
 	ModifyIndex uint64
 }
+
+// DefaultMinAffinitySpreadScoreNodes is the default minimum number of nodes
+// scored when the generic scheduler evaluates affinity or spread rules.
+const DefaultMinAffinitySpreadScoreNodes = 100
 
 func (s *SchedulerConfiguration) Copy() *SchedulerConfiguration {
 	if s == nil {
@@ -244,6 +253,9 @@ func (s *SchedulerConfiguration) Copy() *SchedulerConfiguration {
 	}
 
 	ns := *s
+	if s.MinAffinitySpreadScoreNodes != nil {
+		ns.MinAffinitySpreadScoreNodes = pointer.Of(*s.MinAffinitySpreadScoreNodes)
+	}
 	return &ns
 }
 
@@ -253,6 +265,16 @@ func (s *SchedulerConfiguration) EffectiveSchedulerAlgorithm() SchedulerAlgorith
 	}
 
 	return s.SchedulerAlgorithm
+}
+
+// EffectiveMinAffinitySpreadScoreNodes returns the configured minimum number
+// of nodes scored for affinity and spread rules, or the default when unset.
+func (s *SchedulerConfiguration) EffectiveMinAffinitySpreadScoreNodes() int {
+	if s == nil || s.MinAffinitySpreadScoreNodes == nil {
+		return DefaultMinAffinitySpreadScoreNodes
+	}
+
+	return *s.MinAffinitySpreadScoreNodes
 }
 
 // WithNodePool returns a new SchedulerConfiguration with the node pool
@@ -276,8 +298,13 @@ func (s *SchedulerConfiguration) WithNodePool(pool *NodePool) *SchedulerConfigur
 }
 
 func (s *SchedulerConfiguration) Canonicalize() {
-	if s != nil && s.SchedulerAlgorithm == "" {
-		s.SchedulerAlgorithm = SchedulerAlgorithmBinpack
+	if s != nil {
+		if s.SchedulerAlgorithm == "" {
+			s.SchedulerAlgorithm = SchedulerAlgorithmBinpack
+		}
+		if s.MinAffinitySpreadScoreNodes == nil {
+			s.MinAffinitySpreadScoreNodes = pointer.Of(DefaultMinAffinitySpreadScoreNodes)
+		}
 	}
 }
 
@@ -290,6 +317,9 @@ func (s *SchedulerConfiguration) Validate() error {
 	case "", SchedulerAlgorithmBinpack, SchedulerAlgorithmSpread:
 	default:
 		return fmt.Errorf("invalid scheduler algorithm: %v", s.SchedulerAlgorithm)
+	}
+	if s.MinAffinitySpreadScoreNodes != nil && *s.MinAffinitySpreadScoreNodes < 1 {
+		return fmt.Errorf("min_affinity_spread_score_nodes must be greater than 0")
 	}
 
 	return nil

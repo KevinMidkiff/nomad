@@ -79,6 +79,7 @@ func (o *OperatorSchedulerGetConfig) Run(args []string) int {
 	// Output the information.
 	o.Ui.Output(formatKV([]string{
 		fmt.Sprintf("Scheduler Algorithm|%s", schedConfig.SchedulerAlgorithm),
+		fmt.Sprintf("Min Affinity Spread Score Nodes|%d", schedConfig.EffectiveMinAffinitySpreadScoreNodes()),
 		fmt.Sprintf("Memory Oversubscription|%v", schedConfig.MemoryOversubscriptionEnabled),
 		fmt.Sprintf("Reject Job Registration|%v", schedConfig.RejectJobRegistration),
 		fmt.Sprintf("Pause Eval Broker|%v", schedConfig.PauseEvalBroker),

@@ -308,6 +308,7 @@ func (s *HTTPServer) schedulerUpdateConfig(resp http.ResponseWriter, req *http.R
 
 	args.Config = structs.SchedulerConfiguration{
 		SchedulerAlgorithm:            structs.SchedulerAlgorithm(conf.SchedulerAlgorithm),
+		MinAffinitySpreadScoreNodes:   conf.MinAffinitySpreadScoreNodes,
 		MemoryOversubscriptionEnabled: conf.MemoryOversubscriptionEnabled,
 		RejectJobRegistration:         conf.RejectJobRegistration,
 		PauseEvalBroker:               conf.PauseEvalBroker,

@@ -6598,7 +6598,9 @@ func (s *StateStore) schedulerConfigTxn(txn *txn) (uint64, *structs.SchedulerCon
 		return 0, nil, nil
 	}
 
-	return config.ModifyIndex, config, nil
+	out := config.Copy()
+	out.Canonicalize()
+	return out.ModifyIndex, out, nil
 }
 
 // SchedulerSetConfig is used to set the current Scheduler configuration.
@@ -6684,6 +6686,9 @@ func (s *StateStore) SchedulerCASConfig(index, cidx uint64, config *structs.Sche
 }
 
 func (s *StateStore) schedulerSetConfigTxn(idx uint64, tx *txn, config *structs.SchedulerConfiguration) error {
+	config = config.Copy()
+	config.Canonicalize()
+
 	// Check for an existing config
 	existing, err := tx.First("scheduler_config", "id")
 	if err != nil {

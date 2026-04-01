@@ -185,9 +185,23 @@ type SchedulerConfiguration struct {
 	// until the configuration is updated and written to the Nomad servers.
 	PauseEvalBroker bool
 
+	// MinAffinitySpreadScoreNodes is the minimum number of nodes scored by the
+	// generic scheduler when a task group uses affinity or spread rules.
+	MinAffinitySpreadScoreNodes *int
+
 	// CreateIndex/ModifyIndex store the create/modify indexes of this configuration.
 	CreateIndex uint64
 	ModifyIndex uint64
+}
+
+// EffectiveMinAffinitySpreadScoreNodes returns the configured minimum number
+// of nodes scored for affinity and spread rules, or the default when unset.
+func (s *SchedulerConfiguration) EffectiveMinAffinitySpreadScoreNodes() int {
+	if s == nil || s.MinAffinitySpreadScoreNodes == nil {
+		return 100
+	}
+
+	return *s.MinAffinitySpreadScoreNodes
 }
 
 // SchedulerConfigurationResponse is the response object that wraps SchedulerConfiguration

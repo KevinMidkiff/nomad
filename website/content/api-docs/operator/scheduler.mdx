@@ -44,6 +44,7 @@ $ curl \
   "SchedulerConfig": {
     "CreateIndex": 5,
     "MemoryOversubscriptionEnabled": false,
+    "MinAffinitySpreadScoreNodes": 100,
     "ModifyIndex": 5,
     "PauseEvalBroker": false,
     "PreemptionConfig": {
@@ -70,6 +71,11 @@ $ curl \
     binpacks or spreads allocations on available nodes. Node pools may set
     their own [`SchedulerAlgorithm`][np_sched_algo] value that takes precedence
     over this global value.
+
+  - `MinAffinitySpreadScoreNodes` `(int: 100)` - Specifies the minimum number
+    of nodes the generic scheduler scores when a task group uses affinity or
+    spread rules. The scheduler still evaluates at least the task group count
+    when it is larger than this value.
 
   - `MemoryOversubscriptionEnabled` `(bool: false)` - When `true`, tasks may
     exceed their reserved memory limit, if the client has excess memory
@@ -138,6 +144,7 @@ server state is authoritative.
 ```json
 {
   "SchedulerAlgorithm": "spread",
+  "MinAffinitySpreadScoreNodes": 200,
   "MemoryOversubscriptionEnabled": false,
   "RejectJobRegistration": false,
   "PauseEvalBroker": false,
@@ -154,6 +161,11 @@ server state is authoritative.
   binpacks or spreads allocations on available nodes. Possible values are
   `"binpack"` and `"spread"`. This value may also be set per [node
   pool][np_sched_algo].
+
+- `MinAffinitySpreadScoreNodes` `(int: 100)` - Specifies the minimum number of
+  nodes the generic scheduler scores when a task group uses affinity or spread
+  rules. The scheduler still evaluates at least the task group count when it is
+  larger than this value.
 
 - `MemoryOversubscriptionEnabled` `(bool: false)` - When `true`, tasks may
   exceed their reserved memory limit, if the client has excess memory capacity.

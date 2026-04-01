@@ -421,6 +421,7 @@ job-type schedulers.
 server {
   default_scheduler_config {
     scheduler_algorithm             = "spread"
+    min_affinity_spread_score_nodes = 200
     memory_oversubscription_enabled = true
     reject_job_registration         = false
     pause_eval_broker               = false

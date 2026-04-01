@@ -49,6 +49,8 @@ type GenericStack struct {
 	ctx    Context
 	source *StaticIterator
 
+	minAffinitySpreadScoreNodes int
+
 	wrappedChecks        *FeasibilityWrapper
 	quota                FeasibleIterator
 	jobVersion           *uint64
@@ -128,6 +130,7 @@ func (s *GenericStack) SetJob(job *structs.Job) {
 // on the node pool being used.
 func (s *GenericStack) SetSchedulerConfiguration(schedConfig *structs.SchedulerConfiguration) {
 	s.binPack.SetSchedulerConfiguration(schedConfig)
+	s.minAffinitySpreadScoreNodes = schedConfig.EffectiveMinAffinitySpreadScoreNodes()
 }
 
 func (s *GenericStack) Select(tg *structs.TaskGroup, options *SelectOptions) *RankedNode {
@@ -184,8 +187,8 @@ func (s *GenericStack) Select(tg *structs.TaskGroup, options *SelectOptions) *Ra
 		// reasonable but enough to ensure spread is correct. this
 		// value was empirically determined.
 		s.limit.SetLimit(tg.Count)
-		if tg.Count < 100 {
-			s.limit.SetLimit(100)
+		if tg.Count < s.minAffinitySpreadScoreNodes {
+			s.limit.SetLimit(s.minAffinitySpreadScoreNodes)
 		}
 	}
 
@@ -379,8 +382,9 @@ func (s *SystemStack) Select(tg *structs.TaskGroup, options *SelectOptions) *Ran
 func NewGenericStack(batch bool, ctx Context) *GenericStack {
 	// Create a new stack
 	s := &GenericStack{
-		batch: batch,
-		ctx:   ctx,
+		batch:                       batch,
+		ctx:                         ctx,
+		minAffinitySpreadScoreNodes: structs.DefaultMinAffinitySpreadScoreNodes,
 	}
 
 	// Create the source iterator. We randomize the order we visit nodes

@@ -10,6 +10,7 @@ import (
 	"github.com/hashicorp/cli"
 	"github.com/hashicorp/nomad/api"
 	flagHelper "github.com/hashicorp/nomad/helper/flags"
+	"github.com/hashicorp/nomad/helper/pointer"
 	"github.com/posener/complete"
 )
 
@@ -22,15 +23,16 @@ type OperatorSchedulerSetConfig struct {
 	// The scheduler configuration flags allow us to tell whether the user set
 	// a value or not. This means we can safely merge the current configuration
 	// with user supplied, selective updates.
-	checkIndex               string
-	schedulerAlgorithm       string
-	memoryOversubscription   flagHelper.BoolValue
-	rejectJobRegistration    flagHelper.BoolValue
-	pauseEvalBroker          flagHelper.BoolValue
-	preemptBatchScheduler    flagHelper.BoolValue
-	preemptServiceScheduler  flagHelper.BoolValue
-	preemptSysBatchScheduler flagHelper.BoolValue
-	preemptSystemScheduler   flagHelper.BoolValue
+	checkIndex                  string
+	schedulerAlgorithm          string
+	minAffinitySpreadScoreNodes int
+	memoryOversubscription      flagHelper.BoolValue
+	rejectJobRegistration       flagHelper.BoolValue
+	pauseEvalBroker             flagHelper.BoolValue
+	preemptBatchScheduler       flagHelper.BoolValue
+	preemptServiceScheduler     flagHelper.BoolValue
+	preemptSysBatchScheduler    flagHelper.BoolValue
+	preemptSystemScheduler      flagHelper.BoolValue
 }
 
 func (o *OperatorSchedulerSetConfig) AutocompleteFlags() complete.Flags {
@@ -41,13 +43,14 @@ func (o *OperatorSchedulerSetConfig) AutocompleteFlags() complete.Flags {
 				string(api.SchedulerAlgorithmBinpack),
 				string(api.SchedulerAlgorithmSpread),
 			),
-			"-memory-oversubscription":    complete.PredictSet("true", "false"),
-			"-reject-job-registration":    complete.PredictSet("true", "false"),
-			"-pause-eval-broker":          complete.PredictSet("true", "false"),
-			"-preempt-batch-scheduler":    complete.PredictSet("true", "false"),
-			"-preempt-service-scheduler":  complete.PredictSet("true", "false"),
-			"-preempt-sysbatch-scheduler": complete.PredictSet("true", "false"),
-			"-preempt-system-scheduler":   complete.PredictSet("true", "false"),
+			"-min-affinity-spread-score-nodes": complete.PredictAnything,
+			"-memory-oversubscription":         complete.PredictSet("true", "false"),
+			"-reject-job-registration":         complete.PredictSet("true", "false"),
+			"-pause-eval-broker":               complete.PredictSet("true", "false"),
+			"-preempt-batch-scheduler":         complete.PredictSet("true", "false"),
+			"-preempt-service-scheduler":       complete.PredictSet("true", "false"),
+			"-preempt-sysbatch-scheduler":      complete.PredictSet("true", "false"),
+			"-preempt-system-scheduler":        complete.PredictSet("true", "false"),
 		},
 	)
 }
@@ -63,8 +66,10 @@ func (o *OperatorSchedulerSetConfig) Run(args []string) int {
 	flags := o.Meta.FlagSet("set-config", FlagSetClient)
 	flags.Usage = func() { o.Ui.Output(o.Help()) }
 
+	o.minAffinitySpreadScoreNodes = -1
 	flags.StringVar(&o.checkIndex, "check-index", "", "")
 	flags.StringVar(&o.schedulerAlgorithm, "scheduler-algorithm", "", "")
+	flags.IntVar(&o.minAffinitySpreadScoreNodes, "min-affinity-spread-score-nodes", -1, "")
 	flags.Var(&o.memoryOversubscription, "memory-oversubscription", "")
 	flags.Var(&o.rejectJobRegistration, "reject-job-registration", "")
 	flags.Var(&o.pauseEvalBroker, "pause-eval-broker", "")
@@ -127,6 +132,9 @@ func (o *OperatorSchedulerSetConfig) Run(args []string) int {
 	if o.schedulerAlgorithm != "" {
 		schedulerConfig.SchedulerAlgorithm = api.SchedulerAlgorithm(o.schedulerAlgorithm)
 	}
+	if o.minAffinitySpreadScoreNodes >= 0 {
+		schedulerConfig.MinAffinitySpreadScoreNodes = pointer.Of(o.minAffinitySpreadScoreNodes)
+	}
 	o.memoryOversubscription.Merge(&schedulerConfig.MemoryOversubscriptionEnabled)
 	o.rejectJobRegistration.Merge(&schedulerConfig.RejectJobRegistration)
 	o.pauseEvalBroker.Merge(&schedulerConfig.PauseEvalBroker)
@@ -176,6 +184,11 @@ Scheduler Set Config Options:
   -scheduler-algorithm=["binpack"|"spread"]
     Specifies whether scheduler binpacks or spreads allocations on available
     nodes.
+
+  -min-affinity-spread-score-nodes=<n>
+    Specifies the minimum number of nodes the generic scheduler scores when a
+    task group uses affinity or spread rules. The scheduler still evaluates at
+    least the task group count when it is larger than this value.
 
   -memory-oversubscription=[true|false]
     When true, tasks may exceed their reserved memory limit, if the client has

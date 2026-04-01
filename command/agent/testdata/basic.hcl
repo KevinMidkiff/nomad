@@ -159,7 +159,8 @@ server {
   }
 
   default_scheduler_config {
-    scheduler_algorithm = "spread"
+    scheduler_algorithm             = "spread"
+    min_affinity_spread_score_nodes = 200
 
     preemption_config {
       batch_scheduler_enabled   = true

@@ -2577,6 +2577,7 @@ func TestFSM_SnapshotRestore_SchedulerConfiguration(t *testing.T) {
 			SystemSchedulerEnabled: true,
 		},
 	}
+	schedConfig.Canonicalize()
 	state.SchedulerSetConfig(1000, schedConfig)
 
 	// Verify the contents
@@ -2586,7 +2587,10 @@ func TestFSM_SnapshotRestore_SchedulerConfiguration(t *testing.T) {
 	index, out, err := state2.SchedulerConfig()
 	require.Nil(err)
 	require.EqualValues(1000, index)
-	require.Equal(schedConfig, out)
+	expected := schedConfig.Copy()
+	expected.CreateIndex = 1000
+	expected.ModifyIndex = 1000
+	require.Equal(expected, out)
 }
 
 func TestFSM_SnapshotRestore_ClusterMetadata(t *testing.T) {
@@ -3029,6 +3033,7 @@ func TestFSM_SchedulerConfig(t *testing.T) {
 			},
 		},
 	}
+	req.Config.Canonicalize()
 	buf, err := structs.Encode(structs.SchedulerConfigRequestType, req)
 	require.Nil(err)
 

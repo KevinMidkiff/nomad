@@ -149,7 +149,8 @@ var basicConfig = &Config{
 			RetryMaxAttempts: 3,
 		},
 		DefaultSchedulerConfig: &structs.SchedulerConfiguration{
-			SchedulerAlgorithm: "spread",
+			SchedulerAlgorithm:          "spread",
+			MinAffinitySpreadScoreNodes: pointer.Of(200),
 			PreemptionConfig: structs.PreemptionConfig{
 				SystemSchedulerEnabled:  true,
 				BatchSchedulerEnabled:   true,

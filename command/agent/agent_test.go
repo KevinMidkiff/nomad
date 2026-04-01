@@ -195,7 +195,8 @@ func TestAgent_ServerConfig_SchedulerFlags(t *testing.T) {
 			"default case",
 			nil,
 			structs.SchedulerConfiguration{
-				SchedulerAlgorithm: "binpack",
+				SchedulerAlgorithm:          "binpack",
+				MinAffinitySpreadScoreNodes: pointer.Of(structs.DefaultMinAffinitySpreadScoreNodes),
 				PreemptionConfig: structs.PreemptionConfig{
 					SystemSchedulerEnabled: true,
 				},
