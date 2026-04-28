@@ -166,6 +166,10 @@ func TestVolumeHook_Interpolation(t *testing.T) {
 	ci.Parallel(t)
 
 	alloc := mock.Alloc()
+	if alloc.Job.Meta == nil {
+		alloc.Job.Meta = map[string]string{}
+	}
+	alloc.Job.Meta[taskenv.IncludeNomadEnvMetaKey] = "true"
 	task := alloc.Job.TaskGroups[0].Tasks[0]
 	taskEnv := taskenv.NewBuilder(mock.Node(), alloc, task, "global").SetHookEnv("volume",
 		map[string]string{
