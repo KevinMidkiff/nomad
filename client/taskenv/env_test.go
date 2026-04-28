@@ -48,6 +48,17 @@ var (
 	}
 )
 
+// enableNomadEnvMeta opts the given alloc into Nomad's standard env injection
+// by setting IncludeNomadEnvMetaKey on the job meta. The taskenv builder is
+// otherwise a minimal env (task env stanza + host + hooks + templates) and
+// existing tests assume the full set.
+func enableNomadEnvMeta(a *structs.Allocation) {
+	if a.Job.Meta == nil {
+		a.Job.Meta = map[string]string{}
+	}
+	a.Job.Meta[IncludeNomadEnvMetaKey] = "true"
+}
+
 func testEnvBuilder() *Builder {
 	n := mock.Node()
 	n.Attributes = map[string]string{
@@ -65,7 +76,9 @@ func testEnvBuilder() *Builder {
 		envOneKey: envOneVal,
 		envTwoKey: envTwoVal,
 	}
-	return NewBuilder(n, mock.Alloc(), task, "global")
+	a := mock.Alloc()
+	enableNomadEnvMeta(a)
+	return NewBuilder(n, a, task, "global")
 }
 
 func TestEnvironment_ParseAndReplace_Env(t *testing.T) {
@@ -212,6 +225,7 @@ func TestEnvironment_AsList(t *testing.T) {
 	task.Env = map[string]string{
 		"taskEnvKey": "taskEnvVal",
 	}
+	enableNomadEnvMeta(a)
 	env := NewBuilder(n, a, task, "global").SetDriverNetwork(
 		&drivers.DriverNetwork{PortMap: map[string]int{"https": 443}},
 	).SetDefaultWorkloadToken("test-wi-token")
@@ -342,6 +356,7 @@ func TestEnvironment_AllValues(t *testing.T) {
 		"taskMetaKey-${NOMAD_TASK_NAME}": "taskMetaVal-${node.unique.id}",
 		"foo":                            "bar",
 	}
+	enableNomadEnvMeta(a)
 	env := NewBuilder(n, a, task, "global").SetDriverNetwork(
 		&drivers.DriverNetwork{PortMap: map[string]int{"https": 443}},
 	).SetDefaultWorkloadToken("test-wi-token")
@@ -497,6 +512,7 @@ func TestEnvironment_VaultToken(t *testing.T) {
 
 	n := mock.Node()
 	a := mock.Alloc()
+	enableNomadEnvMeta(a)
 	env := NewBuilder(n, a, a.Job.TaskGroups[0].Tasks[0], "global")
 	env.SetVaultToken("123", "vault-namespace", false)
 
@@ -560,6 +576,7 @@ func TestEnvironment_Envvars(t *testing.T) {
 	envMap := map[string]string{"foo": "baz", "bar": "bang"}
 	n := mock.Node()
 	a := mock.Alloc()
+	enableNomadEnvMeta(a)
 	task := a.Job.TaskGroups[0].Tasks[0]
 	task.Env = envMap
 	net := &drivers.DriverNetwork{PortMap: portMap}
@@ -575,6 +592,54 @@ func TestEnvironment_Envvars(t *testing.T) {
 	}
 }
 
+// TestEnvironment_NomadEnvOptOut asserts that when the
+// IncludeNomadEnvMetaKey meta key is unset, Nomad does not inject the standard
+// NOMAD_*, VAULT_TOKEN, NOMAD_META_*, or task meta env vars, while task env
+// stanza values still flow through.
+func TestEnvironment_NomadEnvOptOut(t *testing.T) {
+	ci.Parallel(t)
+
+	n := mock.Node()
+	a := mock.Alloc()
+	// Intentionally do NOT call enableNomadEnvMeta(a).
+
+	task := a.Job.TaskGroups[0].Tasks[0]
+	task.Env = map[string]string{"FOO": "bar"}
+
+	envMap := NewBuilder(n, a, task, "global").
+		SetVaultToken("vault-tok", "vault-ns", true).
+		SetDefaultWorkloadToken("wi-tok").
+		Build().Map()
+
+	// Task env stanza still works.
+	if envMap["FOO"] != "bar" {
+		t.Fatalf("expected FOO=bar, got %q", envMap["FOO"])
+	}
+
+	mustNotHave := []string{
+		AllocID, ShortAllocID, AllocName, AllocIndex,
+		TaskName, GroupName,
+		JobID, JobName, JobParentID,
+		Namespace, Region, Datacenter,
+		MemLimit, CpuLimit,
+		AllocDir, TaskLocalDir, SecretsDir,
+		VaultToken, VaultNamespace,
+		WorkloadToken, UnixAddr,
+	}
+	for _, k := range mustNotHave {
+		if _, ok := envMap[k]; ok {
+			t.Fatalf("expected %q to be absent without opt-in, got %q", k, envMap[k])
+		}
+	}
+
+	// No NOMAD_META_* should be present either.
+	for k := range envMap {
+		if strings.HasPrefix(k, MetaPrefix) {
+			t.Fatalf("unexpected meta key %q without opt-in", k)
+		}
+	}
+}
+
 // TestEnvironment_HookVars asserts hook env vars are LWW and deletes of later
 // writes allow earlier hook's values to be visible.
 func TestEnvironment_HookVars(t *testing.T) {
@@ -582,6 +647,7 @@ func TestEnvironment_HookVars(t *testing.T) {
 
 	n := mock.Node()
 	a := mock.Alloc()
+	enableNomadEnvMeta(a)
 	builder := NewBuilder(n, a, a.Job.TaskGroups[0].Tasks[0], "global")
 
 	// Add vars from two hooks and assert the second one wins on
@@ -621,6 +687,7 @@ func TestEnvironment_DeviceHookVars(t *testing.T) {
 	require := require.New(t)
 	n := mock.Node()
 	a := mock.Alloc()
+	enableNomadEnvMeta(a)
 	builder := NewBuilder(n, a, a.Job.TaskGroups[0].Tasks[0], "global")
 
 	// Add vars from two hooks and assert the second one wins on
@@ -649,6 +716,7 @@ func TestEnvironment_Interpolate(t *testing.T) {
 	n.Attributes["arch"] = "x86"
 	n.NodeClass = "test class"
 	a := mock.Alloc()
+	enableNomadEnvMeta(a)
 	task := a.Job.TaskGroups[0].Tasks[0]
 	task.Env = map[string]string{"test": "${node.class}", "test2": "${attr.arch}"}
 	env := NewBuilder(n, a, task, "global").Build()
@@ -697,6 +765,7 @@ func TestEnvironment_DashesInTaskName(t *testing.T) {
 	ci.Parallel(t)
 
 	a := mock.Alloc()
+	enableNomadEnvMeta(a)
 	task := a.Job.TaskGroups[0].Tasks[0]
 	task.Env = map[string]string{
 		"test-one-two":       "three-four",
@@ -719,6 +788,7 @@ func TestEnvironment_WithTask(t *testing.T) {
 
 	a := mock.Alloc()
 	a.Job.TaskGroups[0].Meta = map[string]string{"tgmeta": "tgmetaval"}
+	enableNomadEnvMeta(a)
 	builder := NewBuilder(mock.Node(), a, nil, "global")
 
 	origMap := builder.Build().Map()
@@ -757,6 +827,7 @@ func TestEnvironment_InterpolateEmptyOptionalMeta(t *testing.T) {
 
 	require := require.New(t)
 	a := mock.Alloc()
+	enableNomadEnvMeta(a)
 	a.Job.ParameterizedJob = &structs.ParameterizedJobConfig{
 		MetaOptional: []string{"metaopt1", "metaopt2"},
 	}
@@ -775,6 +846,7 @@ func TestEnvironment_Upstreams(t *testing.T) {
 
 	// Add some upstreams to the mock alloc
 	a := mock.Alloc()
+	enableNomadEnvMeta(a)
 	tg := a.Job.LookupTaskGroup(a.TaskGroup)
 	tg.Services = []*structs.Service{
 		// Services without Connect should be ignored
@@ -899,6 +971,7 @@ func TestEnvironment_TasklessBuilder(t *testing.T) {
 
 	node := mock.Node()
 	alloc := mock.Alloc()
+	enableNomadEnvMeta(alloc)
 	alloc.Job.Meta["jobt"] = "foo"
 	alloc.Job.TaskGroups[0].Meta["groupt"] = "bar"
 	require := require.New(t)

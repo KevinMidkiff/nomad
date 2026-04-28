@@ -246,6 +246,10 @@ func TestScript_TaskEnvInterpolation(t *testing.T) {
 	defer cancel()
 
 	alloc := mock.ConnectAlloc()
+	if alloc.Job.Meta == nil {
+		alloc.Job.Meta = map[string]string{}
+	}
+	alloc.Job.Meta[taskenv.IncludeNomadEnvMetaKey] = "true"
 	task := alloc.Job.TaskGroups[0].Tasks[0]
 
 	task.Services[0].Name = "${NOMAD_JOB_NAME}-${TASK}-${SVC_NAME}"

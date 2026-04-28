@@ -101,6 +101,10 @@ func newTestHarness(t *testing.T, templates []*structs.Template, consul, vault b
 
 	// Build the task environment
 	a := mock.Alloc()
+	if a.Job.Meta == nil {
+		a.Job.Meta = map[string]string{}
+	}
+	a.Job.Meta[taskenv.IncludeNomadEnvMetaKey] = "true"
 	task := a.Job.TaskGroups[0].Tasks[0]
 	task.Name = TestTaskName
 	harness.envBuilder = taskenv.NewBuilder(harness.node, a, task, region)
@@ -542,6 +546,10 @@ func TestTaskTemplateManager_Unblock_Static_NomadEnv(t *testing.T) {
 	}
 
 	a := mock.Alloc()
+	if a.Job.Meta == nil {
+		a.Job.Meta = map[string]string{}
+	}
+	a.Job.Meta[taskenv.IncludeNomadEnvMetaKey] = "true"
 	task := a.Job.TaskGroups[0].Tasks[0]
 	task.Name = TestTaskName
 
@@ -1953,6 +1961,10 @@ func TestTaskTemplateManager_Escapes(t *testing.T) {
 
 	clientConf.Node = mock.Node()
 	alloc := mock.Alloc()
+	if alloc.Job.Meta == nil {
+		alloc.Job.Meta = map[string]string{}
+	}
+	alloc.Job.Meta[taskenv.IncludeNomadEnvMetaKey] = "true"
 	task := alloc.Job.TaskGroups[0].Tasks[0]
 	logger := testlog.HCLogger(t)
 	allocDir := allocdir.NewAllocDir(logger, clientConf.AllocDir, clientConf.AllocMountsDir, alloc.ID)

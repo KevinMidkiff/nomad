@@ -51,6 +51,10 @@ func TestIdentityHook_RenewAll(t *testing.T) {
 
 	node := mock.Node()
 	alloc := mock.Alloc()
+	if alloc.Job.Meta == nil {
+		alloc.Job.Meta = map[string]string{}
+	}
+	alloc.Job.Meta[taskenv.IncludeNomadEnvMetaKey] = "true"
 	alloc.NodeID = node.ID
 	task := alloc.LookupTask("web")
 	task.Identities = []*structs.WorkloadIdentity{
@@ -182,6 +186,10 @@ func TestIdentityHook_RenewOne(t *testing.T) {
 
 	node := mock.Node()
 	alloc := mock.Alloc()
+	if alloc.Job.Meta == nil {
+		alloc.Job.Meta = map[string]string{}
+	}
+	alloc.Job.Meta[taskenv.IncludeNomadEnvMetaKey] = "true"
 	alloc.NodeID = node.ID
 	alloc.SignedIdentities = map[string]string{"web": "does.not.matter"}
 	task := alloc.LookupTask("web")

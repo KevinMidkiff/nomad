@@ -138,6 +138,12 @@ const (
 
 	// WorkloadToken is the environment variable for passing the Nomad Workload Identity token
 	WorkloadToken = "NOMAD_TOKEN"
+
+	// IncludeNomadEnvMetaKey is the task/group/job meta key that opts a workload
+	// in to the standard Nomad-injected env vars (NOMAD_ALLOC_*, VAULT_TOKEN,
+	// task meta, etc.). When unset or not "true" only NOMAD_ALLOC_PORT_* and the
+	// task's own env stanza are exported.
+	IncludeNomadEnvMetaKey = "fal.ai/include-nomad-env"
 )
 
 // The node values that can be interpreted.
@@ -503,6 +509,10 @@ type Builder struct {
 	// upstreams from the group connect enabled services
 	upstreams []structs.ConsulUpstream
 
+	// includeNomadEnv gates injection of the standard Nomad env vars. It is
+	// opt-in via the IncludeNomadEnvMetaKey task/group/job meta key.
+	includeNomadEnv bool
+
 	mu *sync.RWMutex
 }
 
@@ -530,111 +540,113 @@ func (b *Builder) buildEnv(allocDir, localDir, secretsDir string,
 	envMap := make(map[string]string)
 	var deviceEnvs map[string]string
 
-	// Add the directories
-	if allocDir != "" {
-		envMap[AllocDir] = allocDir
-	}
-	if localDir != "" {
-		envMap[TaskLocalDir] = localDir
-	}
-	if secretsDir != "" {
-		envMap[SecretsDir] = secretsDir
-	}
+	if b.includeNomadEnv {
+		// Add the directories
+		if allocDir != "" {
+			envMap[AllocDir] = allocDir
+		}
+		if localDir != "" {
+			envMap[TaskLocalDir] = localDir
+		}
+		if secretsDir != "" {
+			envMap[SecretsDir] = secretsDir
+		}
 
-	// Add the resource limits
-	if b.memLimit != 0 {
-		envMap[MemLimit] = strconv.FormatInt(b.memLimit, 10)
-	}
-	if b.memMaxLimit != 0 {
-		envMap[MemMaxLimit] = strconv.FormatInt(b.memMaxLimit, 10)
-	}
-	if b.cpuLimit != 0 {
-		envMap[CpuLimit] = strconv.FormatInt(b.cpuLimit, 10)
-	}
-	if b.cpuCores != "" {
-		envMap[CpuCores] = b.cpuCores
-	}
+		// Add the resource limits
+		if b.memLimit != 0 {
+			envMap[MemLimit] = strconv.FormatInt(b.memLimit, 10)
+		}
+		if b.memMaxLimit != 0 {
+			envMap[MemMaxLimit] = strconv.FormatInt(b.memMaxLimit, 10)
+		}
+		if b.cpuLimit != 0 {
+			envMap[CpuLimit] = strconv.FormatInt(b.cpuLimit, 10)
+		}
+		if b.cpuCores != "" {
+			envMap[CpuCores] = b.cpuCores
+		}
 
-	// Add the task metadata
-	if b.allocId != "" {
-		envMap[AllocID] = b.allocId
-		envMap[ShortAllocID] = b.allocId[:8]
-	}
-	if b.allocName != "" {
-		envMap[AllocName] = b.allocName
-	}
-	if b.groupName != "" {
-		envMap[GroupName] = b.groupName
-	}
-	if b.allocIndex != -1 {
-		envMap[AllocIndex] = strconv.Itoa(b.allocIndex)
-	}
-	if b.taskName != "" {
-		envMap[TaskName] = b.taskName
-	}
-	if b.jobID != "" {
-		envMap[JobID] = b.jobID
-	}
-	if b.jobName != "" {
-		envMap[JobName] = b.jobName
-	}
-	if b.jobParentID != "" {
-		envMap[JobParentID] = b.jobParentID
-	}
-	if b.datacenter != "" {
-		envMap[Datacenter] = b.datacenter
-	}
-	if b.cgroupParent != "" {
-		envMap[CgroupParent] = b.cgroupParent
-	}
-	if b.namespace != "" {
-		envMap[Namespace] = b.namespace
-	}
-	if b.region != "" {
-		envMap[Region] = b.region
-	}
+		// Add the task metadata
+		if b.allocId != "" {
+			envMap[AllocID] = b.allocId
+			envMap[ShortAllocID] = b.allocId[:8]
+		}
+		if b.allocName != "" {
+			envMap[AllocName] = b.allocName
+		}
+		if b.groupName != "" {
+			envMap[GroupName] = b.groupName
+		}
+		if b.allocIndex != -1 {
+			envMap[AllocIndex] = strconv.Itoa(b.allocIndex)
+		}
+		if b.taskName != "" {
+			envMap[TaskName] = b.taskName
+		}
+		if b.jobID != "" {
+			envMap[JobID] = b.jobID
+		}
+		if b.jobName != "" {
+			envMap[JobName] = b.jobName
+		}
+		if b.jobParentID != "" {
+			envMap[JobParentID] = b.jobParentID
+		}
+		if b.datacenter != "" {
+			envMap[Datacenter] = b.datacenter
+		}
+		if b.cgroupParent != "" {
+			envMap[CgroupParent] = b.cgroupParent
+		}
+		if b.namespace != "" {
+			envMap[Namespace] = b.namespace
+		}
+		if b.region != "" {
+			envMap[Region] = b.region
+		}
 
-	// Build the network related env vars
-	buildNetworkEnv(envMap, b.networks, b.driverNetwork)
+		// Build the network related env vars
+		buildNetworkEnv(envMap, b.networks, b.driverNetwork)
+
+		// Build the Consul Connect upstream env vars
+		buildUpstreamsEnv(envMap, b.upstreams)
+
+		// Build the network namespace information if we have the required
+		// detail available.
+		if b.networkStatus != nil && b.allocatedPorts != nil {
+			addNomadAllocNetwork(envMap, b.allocatedPorts, b.networkStatus)
+		}
+
+		// Build the Vault Token
+		if b.injectVaultToken && b.vaultToken != "" {
+			envMap[VaultToken] = b.vaultToken
+		}
+
+		// Build the Vault Namespace
+		if b.injectVaultToken && b.vaultNamespace != "" {
+			envMap[VaultNamespace] = b.vaultNamespace
+		}
+
+		// Build the Nomad Workload Token
+		if b.workloadTokenDefault != "" {
+			envMap[WorkloadToken] = b.workloadTokenDefault
+			envMap[UnixAddr] = "unix://" + filepath.Join(secretsDir, "api.sock")
+		}
+
+		for name, token := range b.workloadTokens {
+			envMap[WorkloadToken+"_"+name] = token
+			envMap[UnixAddr] = "unix://" + filepath.Join(secretsDir, "api.sock")
+		}
+
+		// Copy and interpolate task meta
+		for k, v := range b.taskMeta {
+			envMap[hargs.ReplaceEnv(k, nodeAttrs, envMap)] = hargs.ReplaceEnv(v, nodeAttrs, envMap)
+		}
+	}
 
 	// Build the addr of the other tasks
 	for k, v := range b.otherPorts {
 		envMap[k] = v
-	}
-
-	// Build the Consul Connect upstream env vars
-	buildUpstreamsEnv(envMap, b.upstreams)
-
-	// Build the network namespace information if we have the required detail
-	// available.
-	if b.networkStatus != nil && b.allocatedPorts != nil {
-		addNomadAllocNetwork(envMap, b.allocatedPorts, b.networkStatus)
-	}
-
-	// Build the Vault Token
-	if b.injectVaultToken && b.vaultToken != "" {
-		envMap[VaultToken] = b.vaultToken
-	}
-
-	// Build the Vault Namespace
-	if b.injectVaultToken && b.vaultNamespace != "" {
-		envMap[VaultNamespace] = b.vaultNamespace
-	}
-
-	// Build the Nomad Workload Token
-	if b.workloadTokenDefault != "" {
-		envMap[WorkloadToken] = b.workloadTokenDefault
-		envMap[UnixAddr] = "unix://" + filepath.Join(secretsDir, "api.sock")
-	}
-
-	for name, token := range b.workloadTokens {
-		envMap[WorkloadToken+"_"+name] = token
-		envMap[UnixAddr] = "unix://" + filepath.Join(secretsDir, "api.sock")
-	}
-
-	// Copy and interpolate task meta
-	for k, v := range b.taskMeta {
-		envMap[hargs.ReplaceEnv(k, nodeAttrs, envMap)] = hargs.ReplaceEnv(v, nodeAttrs, envMap)
 	}
 
 	// Interpolate and add environment variables from the host. Only do this if
@@ -783,6 +795,11 @@ func (b *Builder) setAlloc(alloc *structs.Allocation) *Builder {
 
 	// Set meta
 	combined := alloc.Job.CombinedTaskMeta(alloc.TaskGroup, b.taskName)
+
+	// Opt in to the full Nomad env injection only when explicitly requested
+	// via meta.
+	b.includeNomadEnv = combined[IncludeNomadEnvMetaKey] == "true"
+
 	// taskMetaSize is double to total meta keys to account for given and upper
 	// cased values
 	taskMetaSize := len(combined) * 2
@@ -801,6 +818,11 @@ func (b *Builder) setAlloc(alloc *structs.Allocation) *Builder {
 	}
 
 	for k, v := range combined {
+		// The opt-in meta key is internal plumbing for the env builder and
+		// should not leak into NOMAD_META_*.
+		if k == IncludeNomadEnvMetaKey {
+			continue
+		}
 		b.taskMeta[fmt.Sprintf("%s%s", MetaPrefix, strings.ToUpper(k))] = v
 		b.taskMeta[fmt.Sprintf("%s%s", MetaPrefix, k)] = v
 	}
@@ -846,7 +868,7 @@ func (b *Builder) setAlloc(alloc *structs.Allocation) *Builder {
 
 		// COMPAT(1.0): remove in 1.0 when AllocatedPorts can be used exclusively
 		// Add ports from group networks
-		//TODO Expose IPs but possibly only via variable interpolation
+		// TODO Expose IPs but possibly only via variable interpolation
 		for _, nw := range alloc.AllocatedResources.Shared.Networks {
 			for _, p := range nw.ReservedPorts {
 				addGroupPort(b.otherPorts, p)
