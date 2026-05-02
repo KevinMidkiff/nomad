@@ -540,13 +540,14 @@ func (b *Builder) buildEnv(allocDir, localDir, secretsDir string,
 	envMap := make(map[string]string)
 	var deviceEnvs map[string]string
 
+	if localDir != "" {
+		envMap[TaskLocalDir] = localDir
+	}
+
 	if b.includeNomadEnv {
 		// Add the directories
 		if allocDir != "" {
 			envMap[AllocDir] = allocDir
-		}
-		if localDir != "" {
-			envMap[TaskLocalDir] = localDir
 		}
 		if secretsDir != "" {
 			envMap[SecretsDir] = secretsDir
