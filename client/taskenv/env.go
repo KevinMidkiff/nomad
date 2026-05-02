@@ -544,11 +544,12 @@ func (b *Builder) buildEnv(allocDir, localDir, secretsDir string,
 		envMap[TaskLocalDir] = localDir
 	}
 
+	if allocDir != "" {
+		envMap[AllocDir] = allocDir
+	}
+
 	if b.includeNomadEnv {
 		// Add the directories
-		if allocDir != "" {
-			envMap[AllocDir] = allocDir
-		}
 		if secretsDir != "" {
 			envMap[SecretsDir] = secretsDir
 		}
