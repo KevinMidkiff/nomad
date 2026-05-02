@@ -140,9 +140,10 @@ const (
 	WorkloadToken = "NOMAD_TOKEN"
 
 	// IncludeNomadEnvMetaKey is the task/group/job meta key that opts a workload
-	// in to the standard Nomad-injected env vars (NOMAD_ALLOC_*, VAULT_TOKEN,
-	// task meta, etc.). When unset or not "true" only NOMAD_ALLOC_PORT_* and the
-	// task's own env stanza are exported.
+	// in to the full set of Nomad-injected env vars (alloc/task identity,
+	// resource limits, Vault token, task meta, etc.). When unset or not "true",
+	// only the directories, NOMAD_JOB_ID, network env, and the task's own env
+	// stanza are exported.
 	IncludeNomadEnvMetaKey = "fal.ai/include-nomad-env"
 )
 
@@ -540,6 +541,7 @@ func (b *Builder) buildEnv(allocDir, localDir, secretsDir string,
 	envMap := make(map[string]string)
 	var deviceEnvs map[string]string
 
+	// Add the directories
 	if localDir != "" {
 		envMap[TaskLocalDir] = localDir
 	}
@@ -548,12 +550,21 @@ func (b *Builder) buildEnv(allocDir, localDir, secretsDir string,
 		envMap[AllocDir] = allocDir
 	}
 
-	if b.includeNomadEnv {
-		// Add the directories
-		if secretsDir != "" {
-			envMap[SecretsDir] = secretsDir
-		}
+	if secretsDir != "" {
+		envMap[SecretsDir] = secretsDir
+	}
 
+	if b.jobID != "" {
+		envMap[JobID] = b.jobID
+	}
+
+	buildNetworkEnv(envMap, b.networks, b.driverNetwork)
+
+	if b.networkStatus != nil && b.allocatedPorts != nil {
+		addNomadAllocNetwork(envMap, b.allocatedPorts, b.networkStatus)
+	}
+
+	if b.includeNomadEnv {
 		// Add the resource limits
 		if b.memLimit != 0 {
 			envMap[MemLimit] = strconv.FormatInt(b.memLimit, 10)
@@ -585,9 +596,6 @@ func (b *Builder) buildEnv(allocDir, localDir, secretsDir string,
 		if b.taskName != "" {
 			envMap[TaskName] = b.taskName
 		}
-		if b.jobID != "" {
-			envMap[JobID] = b.jobID
-		}
 		if b.jobName != "" {
 			envMap[JobName] = b.jobName
 		}
@@ -607,17 +615,8 @@ func (b *Builder) buildEnv(allocDir, localDir, secretsDir string,
 			envMap[Region] = b.region
 		}
 
-		// Build the network related env vars
-		buildNetworkEnv(envMap, b.networks, b.driverNetwork)
-
 		// Build the Consul Connect upstream env vars
 		buildUpstreamsEnv(envMap, b.upstreams)
-
-		// Build the network namespace information if we have the required
-		// detail available.
-		if b.networkStatus != nil && b.allocatedPorts != nil {
-			addNomadAllocNetwork(envMap, b.allocatedPorts, b.networkStatus)
-		}
 
 		// Build the Vault Token
 		if b.injectVaultToken && b.vaultToken != "" {

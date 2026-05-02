@@ -607,6 +607,9 @@ func TestEnvironment_NomadEnvOptOut(t *testing.T) {
 	task.Env = map[string]string{"FOO": "bar"}
 
 	envMap := NewBuilder(n, a, task, "global").
+		SetAllocDir("/alloc").
+		SetTaskLocalDir("/local").
+		SetSecretsDir("/secrets").
 		SetVaultToken("vault-tok", "vault-ns", true).
 		SetDefaultWorkloadToken("wi-tok").
 		Build().Map()
@@ -619,16 +622,24 @@ func TestEnvironment_NomadEnvOptOut(t *testing.T) {
 	mustNotHave := []string{
 		AllocID, ShortAllocID, AllocName, AllocIndex,
 		TaskName, GroupName,
-		JobID, JobName, JobParentID,
+		JobName, JobParentID,
 		Namespace, Region, Datacenter,
 		MemLimit, CpuLimit,
-		AllocDir, TaskLocalDir, SecretsDir,
 		VaultToken, VaultNamespace,
 		WorkloadToken, UnixAddr,
 	}
 	for _, k := range mustNotHave {
 		if _, ok := envMap[k]; ok {
 			t.Fatalf("expected %q to be absent without opt-in, got %q", k, envMap[k])
+		}
+	}
+
+	mustHave := []string{
+		AllocDir, TaskLocalDir, SecretsDir, JobID,
+	}
+	for _, k := range mustHave {
+		if _, ok := envMap[k]; !ok {
+			t.Fatalf("expected %q to be present without opt-in", k)
 		}
 	}
 
