@@ -38,6 +38,7 @@ type SelectOptions struct {
 	PenaltyNodeIDs          map[string]struct{}
 	PreferredNodes          []*structs.Node
 	Preempt                 bool
+	PreemptGreedy           bool
 	AllocName               string
 	AllocationHostVolumeIDs []string
 }
@@ -173,6 +174,7 @@ func (s *GenericStack) Select(tg *structs.TaskGroup, options *SelectOptions) *Ra
 	s.binPack.SetTaskGroup(tg)
 	if options != nil {
 		s.binPack.evict = options.Preempt
+		s.binPack.evictGreedyOnly = options.PreemptGreedy
 	}
 	s.jobAntiAff.SetTaskGroup(tg)
 	if options != nil {

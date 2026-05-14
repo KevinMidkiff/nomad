@@ -17,6 +17,29 @@ import (
 	"github.com/hashicorp/nomad/nomad/structs"
 )
 
+// JobMetaGreedy is the job meta key that marks a job as a "greedy" workload —
+// best-effort allocs that may be evicted by any non-greedy alloc that needs
+// their resources, regardless of priority. See isGreedyJob / isGreedyAlloc.
+const JobMetaGreedy = "greedy"
+
+// isGreedyJob reports whether a job is marked as greedy via its meta. Greedy
+// allocs are evicted by the greedy-only preemption pass without regard for the
+// priority-delta-of-10 rule that governs ordinary preemption.
+func isGreedyJob(j *structs.Job) bool {
+	if j == nil {
+		return false
+	}
+	return j.Meta[JobMetaGreedy] == "true"
+}
+
+// isGreedyAlloc reports whether an alloc's job is marked greedy.
+func isGreedyAlloc(a *structs.Allocation) bool {
+	if a == nil {
+		return false
+	}
+	return isGreedyJob(a.Job)
+}
+
 // allocTuple is a tuple of the allocation name and potential alloc ID
 type allocTuple struct {
 	Name      string

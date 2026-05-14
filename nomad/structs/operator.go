@@ -416,6 +416,13 @@ type PreemptionConfig struct {
 
 	// ServiceSchedulerEnabled specifies if preemption is enabled for service jobs
 	ServiceSchedulerEnabled bool `hcl:"service_scheduler_enabled"`
+
+	// GreedyPreemptionEnabled specifies whether the greedy-only preemption
+	// path is active. When true, allocs whose job has meta.greedy="true" are
+	// preemptible by any non-greedy alloc that needs their resources,
+	// independently of the other *SchedulerEnabled flags and the
+	// priority-delta-of-10 rule. Default: false.
+	GreedyPreemptionEnabled bool `hcl:"greedy_preemption_enabled"`
 }
 
 // SchedulerSetConfigRequest is used by the Operator endpoint to update the

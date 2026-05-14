@@ -5326,6 +5326,22 @@ func TestPlan_AppendPreemptedAllocAppendsAllocWithUpdatedAttrs(t *testing.T) {
 	assert.Equal(t, expectedAlloc, appendedAlloc)
 }
 
+func TestPlan_AppendPreemptedAlloc_GreedyDescription(t *testing.T) {
+	ci.Parallel(t)
+	plan := &Plan{
+		NodePreemptions: make(map[string][]*Allocation),
+	}
+	alloc := MockAlloc()
+	alloc.Job.Meta = map[string]string{"greedy": "true"}
+	preemptingAllocID := uuid.Generate()
+
+	plan.AppendPreemptedAlloc(alloc, preemptingAllocID)
+
+	appended := plan.NodePreemptions[alloc.NodeID][0]
+	must.Eq(t, AllocDesiredStatusEvict, appended.DesiredStatus)
+	must.Eq(t, fmt.Sprintf("Greedy alloc evicted for alloc ID %v", preemptingAllocID), appended.DesiredDescription)
+}
+
 func TestMsgPackTags(t *testing.T) {
 	ci.Parallel(t)
 

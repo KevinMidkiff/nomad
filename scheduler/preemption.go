@@ -129,6 +129,11 @@ type Preemptor struct {
 	// currentAllocs is the candidate set used to find preemptible allocations
 	currentAllocs []*structs.Allocation
 
+	// greedyOnly, when set, restricts preemption candidates to allocs whose
+	// job is marked greedy (see JobMetaGreedy) and bypasses the
+	// priority-delta-of-10 rule. Used by the greedy-only preemption pass.
+	greedyOnly bool
+
 	// ctx is the context from the scheduler stack
 	ctx Context
 }
@@ -156,8 +161,16 @@ func (p *Preemptor) Copy() *Preemptor {
 		jobID:                  p.jobID,
 		nodeRemainingResources: p.nodeRemainingResources.Copy(),
 		currentAllocs:          helper.CopySlice(p.currentAllocs),
+		greedyOnly:             p.greedyOnly,
 		ctx:                    p.ctx,
 	}
+}
+
+// SetGreedyOnly toggles greedy-only filtering. When true, only allocs whose
+// job has meta.greedy="true" are eligible for preemption, and the
+// priority-delta-of-10 rule is bypassed.
+func (p *Preemptor) SetGreedyOnly(b bool) {
+	p.greedyOnly = b
 }
 
 // SetNode sets the node
@@ -223,6 +236,7 @@ func (p *Preemptor) getNumPreemptions(alloc *structs.Allocation) int {
 
 // PreemptForTaskGroup computes a list of allocations to preempt to accommodate
 // the resources asked for. Only allocs with a job priority < 10 of jobPriority are considered
+// (or only greedy allocs if greedyOnly is set).
 // This method is meant only for finding preemptible allocations based on CPU/Memory/Disk
 func (p *Preemptor) PreemptForTaskGroup(resourceAsk *structs.AllocatedResources) []*structs.Allocation {
 	resourcesNeeded := resourceAsk.Comparable()
@@ -234,7 +248,7 @@ func (p *Preemptor) PreemptForTaskGroup(resourceAsk *structs.AllocatedResources)
 	}
 
 	// Group candidates by priority, filter out ineligible allocs
-	allocsByPriority := filterAndGroupPreemptibleAllocs(p.jobPriority, p.currentAllocs)
+	allocsByPriority := filterAndGroupPreemptibleAllocs(p.jobPriority, p.currentAllocs, p.greedyOnly)
 
 	var bestAllocs []*structs.Allocation
 	allRequirementsMet := false
@@ -335,8 +349,15 @@ func (p *Preemptor) PreemptForNetwork(networkResourceAsk *structs.NetworkResourc
 		// We only check first network - TODO: why?!?!
 		net := networks[0]
 
-		// Filter out alloc that's ineligible due to priority
-		if p.jobPriority-alloc.Job.Priority < 10 {
+		// Filter out alloc that's ineligible: priority delta in normal mode,
+		// non-greedy in greedy-only mode.
+		var ineligible bool
+		if p.greedyOnly {
+			ineligible = !isGreedyAlloc(alloc)
+		} else {
+			ineligible = p.jobPriority-alloc.Job.Priority < 10
+		}
+		if ineligible {
 			// Populate any reserved ports used by
 			// this allocation that cannot be preempted
 			for _, port := range net.ReservedPorts {
@@ -429,7 +450,7 @@ OUTER:
 		}
 
 		// Split by priority
-		allocsByPriority := filterAndGroupPreemptibleAllocs(p.jobPriority, currentAllocs)
+		allocsByPriority := filterAndGroupPreemptibleAllocs(p.jobPriority, currentAllocs, p.greedyOnly)
 
 		for _, allocsGrp := range allocsByPriority {
 			allocs := allocsGrp.allocs
@@ -546,7 +567,7 @@ func (p *Preemptor) PreemptForDevice(ask *structs.RequestedDevice, devAlloc *dev
 OUTER:
 	for deviceIDTuple, allocsGrp := range deviceToAllocs {
 		// First group and sort allocations using this device by priority
-		allocsByPriority := filterAndGroupPreemptibleAllocs(p.jobPriority, allocsGrp.allocs)
+		allocsByPriority := filterAndGroupPreemptibleAllocs(p.jobPriority, allocsGrp.allocs, p.greedyOnly)
 
 		// Reset preempted count for this device
 		preemptedCount := 0
@@ -688,19 +709,29 @@ func scoreForNetwork(resourceUsed *structs.NetworkResource, resourceNeeded *stru
 }
 
 // filterAndGroupPreemptibleAllocs groups allocations by priority after filtering allocs
-// that are not preemptible based on the jobPriority arg
-func filterAndGroupPreemptibleAllocs(jobPriority int, current []*structs.Allocation) []*groupedAllocs {
+// that are not preemptible based on the jobPriority arg. When greedyOnly is set,
+// the priority-delta rule is bypassed and only allocs whose job is marked greedy
+// (meta.greedy="true") are kept.
+func filterAndGroupPreemptibleAllocs(jobPriority int, current []*structs.Allocation, greedyOnly bool) []*groupedAllocs {
 	allocsByPriority := make(map[int][]*structs.Allocation)
 	for _, alloc := range current {
 		if alloc.Job == nil {
 			continue
 		}
 
-		// Skip allocs whose priority is within a delta of 10
-		// This also skips any allocs of the current job
-		// for which we are attempting preemption
-		if jobPriority-alloc.Job.Priority < 10 {
-			continue
+		if greedyOnly {
+			// In greedy-only mode, the priority-delta rule does not apply.
+			// Only greedy allocs are eligible.
+			if !isGreedyAlloc(alloc) {
+				continue
+			}
+		} else {
+			// Skip allocs whose priority is within a delta of 10.
+			// This also skips any allocs of the current job
+			// for which we are attempting preemption.
+			if jobPriority-alloc.Job.Priority < 10 {
+				continue
+			}
 		}
 		grpAllocs, ok := allocsByPriority[alloc.Job.Priority]
 		if !ok {

@@ -327,10 +327,22 @@ func (p *planner) applyPlan(plan *structs.Plan, result *structs.PlanResult, snap
 		}
 	}
 
+	// Suppress follow-up evals for greedy-job preemptions only when the
+	// greedy preemption feature is explicitly enabled. With the feature off,
+	// preserve historical behavior (a follow-up eval is created for every
+	// preempted job).
+	_, schedConfig, _ := p.srv.State().SchedulerConfig()
+	greedyEnabled := schedConfig != nil && schedConfig.PreemptionConfig.GreedyPreemptionEnabled
+
 	var evals []*structs.Evaluation
 	for preemptedJobID := range preemptedJobIDs {
 		job, _ := p.srv.State().JobByID(nil, preemptedJobID.Namespace, preemptedJobID.ID)
 		if job != nil {
+			// Greedy jobs (meta.greedy="true") are placed by an external scheduler;
+			// suppress the auto follow-up eval so Nomad doesn't compete with it.
+			if greedyEnabled && job.Meta["greedy"] == "true" {
+				continue
+			}
 			eval := &structs.Evaluation{
 				ID:          uuid.Generate(),
 				Namespace:   job.Namespace,

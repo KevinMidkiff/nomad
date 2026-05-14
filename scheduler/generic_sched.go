@@ -926,6 +926,18 @@ func (s *GenericScheduler) selectNextOption(tg *structs.TaskGroup, selectOptions
 		selectOptions.Preempt = true
 		option = s.stack.Select(tg, selectOptions)
 	}
+
+	// Third pass: greedy-only preemption. Gated on
+	// PreemptionConfig.GreedyPreemptionEnabled. Only allocs marked greedy
+	// (meta.greedy="true") may be evicted, regardless of priority delta and
+	// independently of the other *SchedulerEnabled flags. Skip if the
+	// incoming job is itself greedy to prevent greedy-evicts-greedy thrash.
+	greedyEnabled := schedConfig != nil && schedConfig.PreemptionConfig.GreedyPreemptionEnabled
+	if option == nil && greedyEnabled && !isGreedyJob(s.job) {
+		selectOptions.Preempt = false
+		selectOptions.PreemptGreedy = true
+		option = s.stack.Select(tg, selectOptions)
+	}
 	return option
 }
 
