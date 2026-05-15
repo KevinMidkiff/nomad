@@ -80,6 +80,8 @@ func (o *OperatorSchedulerGetConfig) Run(args []string) int {
 	o.Ui.Output(formatKV([]string{
 		fmt.Sprintf("Scheduler Algorithm|%s", schedConfig.SchedulerAlgorithm),
 		fmt.Sprintf("Min Affinity Spread Score Nodes|%d", schedConfig.EffectiveMinAffinitySpreadScoreNodes()),
+		fmt.Sprintf("Binpack Score Weight|%v", schedConfig.EffectiveBinpackScoreWeight()),
+		fmt.Sprintf("Device Affinity Score Weight|%v", schedConfig.EffectiveDeviceAffinityScoreWeight()),
 		fmt.Sprintf("Memory Oversubscription|%v", schedConfig.MemoryOversubscriptionEnabled),
 		fmt.Sprintf("Reject Job Registration|%v", schedConfig.RejectJobRegistration),
 		fmt.Sprintf("Pause Eval Broker|%v", schedConfig.PauseEvalBroker),

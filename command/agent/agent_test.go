@@ -197,6 +197,8 @@ func TestAgent_ServerConfig_SchedulerFlags(t *testing.T) {
 			structs.SchedulerConfiguration{
 				SchedulerAlgorithm:          "binpack",
 				MinAffinitySpreadScoreNodes: pointer.Of(structs.DefaultMinAffinitySpreadScoreNodes),
+				BinpackScoreWeight:          pointer.Of(structs.DefaultBinpackScoreWeight),
+				DeviceAffinityScoreWeight:   pointer.Of(structs.DefaultDeviceAffinityScoreWeight),
 				PreemptionConfig: structs.PreemptionConfig{
 					SystemSchedulerEnabled: true,
 				},

@@ -4,6 +4,7 @@
 package structs
 
 import (
+	"math"
 	"testing"
 
 	"github.com/hashicorp/nomad/ci"
@@ -105,4 +106,47 @@ func TestSchedulerConfiguration_WithNodePool(t *testing.T) {
 			must.NotEqOp(t, tc.schedConfig, got)
 		})
 	}
+}
+
+func TestSchedulerConfiguration_ScoreWeights(t *testing.T) {
+	ci.Parallel(t)
+
+	var nilConfig *SchedulerConfiguration
+	must.Eq(t, DefaultBinpackScoreWeight, nilConfig.EffectiveBinpackScoreWeight())
+	must.Eq(t, DefaultDeviceAffinityScoreWeight, nilConfig.EffectiveDeviceAffinityScoreWeight())
+
+	zero := 0.0
+	half := 0.5
+	config := &SchedulerConfiguration{
+		BinpackScoreWeight:        pointer.Of(zero),
+		DeviceAffinityScoreWeight: pointer.Of(half),
+	}
+	must.Eq(t, zero, config.EffectiveBinpackScoreWeight())
+	must.Eq(t, half, config.EffectiveDeviceAffinityScoreWeight())
+
+	copied := config.Copy()
+	must.Eq(t, config, copied)
+	must.NotEqOp(t, config.BinpackScoreWeight, copied.BinpackScoreWeight)
+	must.NotEqOp(t, config.DeviceAffinityScoreWeight, copied.DeviceAffinityScoreWeight)
+
+	defaulted := &SchedulerConfiguration{}
+	defaulted.Canonicalize()
+	must.Eq(t, DefaultBinpackScoreWeight, defaulted.EffectiveBinpackScoreWeight())
+	must.Eq(t, DefaultDeviceAffinityScoreWeight, defaulted.EffectiveDeviceAffinityScoreWeight())
+	must.NotNil(t, defaulted.BinpackScoreWeight)
+	must.NotNil(t, defaulted.DeviceAffinityScoreWeight)
+
+	must.NoError(t, (&SchedulerConfiguration{
+		BinpackScoreWeight:        pointer.Of(0.0),
+		DeviceAffinityScoreWeight: pointer.Of(2.0),
+	}).Validate())
+	must.ErrorContains(t, (&SchedulerConfiguration{
+		BinpackScoreWeight: pointer.Of(-0.1),
+	}).Validate(), "binpack_score_weight")
+	must.ErrorContains(t, (&SchedulerConfiguration{
+		DeviceAffinityScoreWeight: pointer.Of(math.Inf(1)),
+	}).Validate(), "device_affinity_score_weight")
+	must.ErrorContains(t, (&SchedulerConfiguration{
+		DeviceAffinityScoreWeight: pointer.Of(math.NaN()),
+	}).Validate(), "device_affinity_score_weight")
 }

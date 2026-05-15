@@ -6,6 +6,7 @@ package structs
 import (
 	"errors"
 	"fmt"
+	"math"
 	"net/netip"
 	"time"
 
@@ -238,6 +239,16 @@ type SchedulerConfiguration struct {
 	// generic scheduler when a task group uses affinity or spread rules.
 	MinAffinitySpreadScoreNodes *int `hcl:"min_affinity_spread_score_nodes"`
 
+	// BinpackScoreWeight scales the binpack score before it is combined with
+	// other scheduler scores. Values greater than 1 are allowed. If unset,
+	// DefaultBinpackScoreWeight is used.
+	BinpackScoreWeight *float64 `hcl:"binpack_score_weight"`
+
+	// DeviceAffinityScoreWeight scales the device affinity score before it is
+	// combined with other scheduler scores. Values greater than 1 are allowed.
+	// If unset, DefaultDeviceAffinityScoreWeight is used.
+	DeviceAffinityScoreWeight *float64 `hcl:"device_affinity_score_weight"`
+
 	// CreateIndex/ModifyIndex store the create/modify indexes of this configuration.
 	CreateIndex uint64
 	ModifyIndex uint64
@@ -247,6 +258,13 @@ type SchedulerConfiguration struct {
 // scored when the generic scheduler evaluates affinity or spread rules.
 const DefaultMinAffinitySpreadScoreNodes = 100
 
+// DefaultBinpackScoreWeight is the default multiplier for binpack scores.
+const DefaultBinpackScoreWeight = 1.0
+
+// DefaultDeviceAffinityScoreWeight is the default multiplier for device
+// affinity scores.
+const DefaultDeviceAffinityScoreWeight = 1.0
+
 func (s *SchedulerConfiguration) Copy() *SchedulerConfiguration {
 	if s == nil {
 		return s
@@ -255,6 +273,12 @@ func (s *SchedulerConfiguration) Copy() *SchedulerConfiguration {
 	ns := *s
 	if s.MinAffinitySpreadScoreNodes != nil {
 		ns.MinAffinitySpreadScoreNodes = pointer.Of(*s.MinAffinitySpreadScoreNodes)
+	}
+	if s.BinpackScoreWeight != nil {
+		ns.BinpackScoreWeight = pointer.Of(*s.BinpackScoreWeight)
+	}
+	if s.DeviceAffinityScoreWeight != nil {
+		ns.DeviceAffinityScoreWeight = pointer.Of(*s.DeviceAffinityScoreWeight)
 	}
 	return &ns
 }
@@ -275,6 +299,26 @@ func (s *SchedulerConfiguration) EffectiveMinAffinitySpreadScoreNodes() int {
 	}
 
 	return *s.MinAffinitySpreadScoreNodes
+}
+
+// EffectiveBinpackScoreWeight returns the configured binpack score weight, or
+// the default when unset.
+func (s *SchedulerConfiguration) EffectiveBinpackScoreWeight() float64 {
+	if s == nil || s.BinpackScoreWeight == nil {
+		return DefaultBinpackScoreWeight
+	}
+
+	return *s.BinpackScoreWeight
+}
+
+// EffectiveDeviceAffinityScoreWeight returns the configured device affinity
+// score weight, or the default when unset.
+func (s *SchedulerConfiguration) EffectiveDeviceAffinityScoreWeight() float64 {
+	if s == nil || s.DeviceAffinityScoreWeight == nil {
+		return DefaultDeviceAffinityScoreWeight
+	}
+
+	return *s.DeviceAffinityScoreWeight
 }
 
 // WithNodePool returns a new SchedulerConfiguration with the node pool
@@ -305,6 +349,12 @@ func (s *SchedulerConfiguration) Canonicalize() {
 		if s.MinAffinitySpreadScoreNodes == nil {
 			s.MinAffinitySpreadScoreNodes = pointer.Of(DefaultMinAffinitySpreadScoreNodes)
 		}
+		if s.BinpackScoreWeight == nil {
+			s.BinpackScoreWeight = pointer.Of(DefaultBinpackScoreWeight)
+		}
+		if s.DeviceAffinityScoreWeight == nil {
+			s.DeviceAffinityScoreWeight = pointer.Of(DefaultDeviceAffinityScoreWeight)
+		}
 	}
 }
 
@@ -321,8 +371,18 @@ func (s *SchedulerConfiguration) Validate() error {
 	if s.MinAffinitySpreadScoreNodes != nil && *s.MinAffinitySpreadScoreNodes < 1 {
 		return fmt.Errorf("min_affinity_spread_score_nodes must be greater than 0")
 	}
+	if s.BinpackScoreWeight != nil && invalidSchedulerScoreWeight(*s.BinpackScoreWeight) {
+		return fmt.Errorf("binpack_score_weight must be a finite value greater than or equal to 0")
+	}
+	if s.DeviceAffinityScoreWeight != nil && invalidSchedulerScoreWeight(*s.DeviceAffinityScoreWeight) {
+		return fmt.Errorf("device_affinity_score_weight must be a finite value greater than or equal to 0")
+	}
 
 	return nil
+}
+
+func invalidSchedulerScoreWeight(weight float64) bool {
+	return weight < 0 || math.IsNaN(weight) || math.IsInf(weight, 0)
 }
 
 // SchedulerConfigurationResponse is the response object that wraps SchedulerConfiguration

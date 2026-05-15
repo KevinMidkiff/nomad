@@ -151,6 +151,8 @@ var basicConfig = &Config{
 		DefaultSchedulerConfig: &structs.SchedulerConfiguration{
 			SchedulerAlgorithm:          "spread",
 			MinAffinitySpreadScoreNodes: pointer.Of(200),
+			BinpackScoreWeight:          pointer.Of(0.5),
+			DeviceAffinityScoreWeight:   pointer.Of(0.0),
 			PreemptionConfig: structs.PreemptionConfig{
 				SystemSchedulerEnabled:  true,
 				BatchSchedulerEnabled:   true,

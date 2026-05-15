@@ -27,6 +27,8 @@ func TestOperatorSchedulerGetConfig_Run(t *testing.T) {
 	s := ui.OutputWriter.String()
 	must.StrContains(t, s, "Scheduler Algorithm             = binpack")
 	must.StrContains(t, s, "Min Affinity Spread Score Nodes = 100")
+	must.StrContains(t, s, "Binpack Score Weight            = 1")
+	must.StrContains(t, s, "Device Affinity Score Weight    = 1")
 	must.StrContains(t, s, "Preemption SysBatch Scheduler   = false")
 	ui.ErrorWriter.Reset()
 	ui.OutputWriter.Reset()
@@ -37,6 +39,8 @@ func TestOperatorSchedulerGetConfig_Run(t *testing.T) {
 	var js api.SchedulerConfiguration
 	must.NoError(t, json.Unmarshal([]byte(s), &js))
 	must.Eq(t, 100, js.EffectiveMinAffinitySpreadScoreNodes())
+	must.Eq(t, 1.0, js.EffectiveBinpackScoreWeight())
+	must.Eq(t, 1.0, js.EffectiveDeviceAffinityScoreWeight())
 	ui.ErrorWriter.Reset()
 	ui.OutputWriter.Reset()
 

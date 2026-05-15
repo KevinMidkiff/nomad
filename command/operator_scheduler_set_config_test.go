@@ -42,10 +42,14 @@ func TestOperatorSchedulerSetConfig_Run(t *testing.T) {
 	// merging is working correctly and that operators can control the entire
 	// object via the CLI.
 	minAffinitySpreadScoreNodes := 200
+	binpackScoreWeight := 0.5
+	deviceAffinityScoreWeight := 0.0
 	modifyingArgs := []string{
 		"-address=" + addr,
 		"-scheduler-algorithm=spread",
 		"-min-affinity-spread-score-nodes=200",
+		"-binpack-score-weight=0.5",
+		"-device-affinity-score-weight=0",
 		"-pause-eval-broker=true",
 		"-memory-oversubscription=true",
 		"-reject-job-registration=true",
@@ -72,6 +76,8 @@ func TestOperatorSchedulerSetConfig_Run(t *testing.T) {
 		RejectJobRegistration:         true,
 		PauseEvalBroker:               true,
 		MinAffinitySpreadScoreNodes:   &minAffinitySpreadScoreNodes,
+		BinpackScoreWeight:            &binpackScoreWeight,
+		DeviceAffinityScoreWeight:     &deviceAffinityScoreWeight,
 	}, modifiedConfig.SchedulerConfig)
 
 	ui.ErrorWriter.Reset()
@@ -81,6 +87,12 @@ func TestOperatorSchedulerSetConfig_Run(t *testing.T) {
 	// returned.
 	must.One(t, c.Run([]string{"-address=" + addr, "-pause-evil-broker=true"}))
 	must.StrContains(t, ui.OutputWriter.String(), "Usage: nomad operator scheduler set-config")
+	ui.ErrorWriter.Reset()
+	ui.OutputWriter.Reset()
+
+	// Try updating a score weight with an invalid value.
+	must.One(t, c.Run([]string{"-address=" + addr, "-binpack-score-weight=-1"}))
+	must.StrContains(t, ui.ErrorWriter.String(), "must be a finite float greater than or equal to 0")
 	ui.ErrorWriter.Reset()
 	ui.OutputWriter.Reset()
 
@@ -108,6 +120,8 @@ func TestOperatorSchedulerSetConfig_Run(t *testing.T) {
 func schedulerConfigEquals(t *testing.T, expected, actual *api.SchedulerConfiguration) {
 	must.Eq(t, expected.SchedulerAlgorithm, actual.SchedulerAlgorithm)
 	must.Eq(t, expected.EffectiveMinAffinitySpreadScoreNodes(), actual.EffectiveMinAffinitySpreadScoreNodes())
+	must.Eq(t, expected.EffectiveBinpackScoreWeight(), actual.EffectiveBinpackScoreWeight())
+	must.Eq(t, expected.EffectiveDeviceAffinityScoreWeight(), actual.EffectiveDeviceAffinityScoreWeight())
 	must.Eq(t, expected.RejectJobRegistration, actual.RejectJobRegistration)
 	must.Eq(t, expected.MemoryOversubscriptionEnabled, actual.MemoryOversubscriptionEnabled)
 	must.Eq(t, expected.PauseEvalBroker, actual.PauseEvalBroker)

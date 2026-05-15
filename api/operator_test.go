@@ -46,6 +46,8 @@ func TestOperator_SchedulerGetConfiguration(t *testing.T) {
 	must.NoError(t, err)
 	must.NotNil(t, schedulerConfig)
 	must.Eq(t, 100, schedulerConfig.SchedulerConfig.EffectiveMinAffinitySpreadScoreNodes())
+	must.Eq(t, 1.0, schedulerConfig.SchedulerConfig.EffectiveBinpackScoreWeight())
+	must.Eq(t, 1.0, schedulerConfig.SchedulerConfig.EffectiveDeviceAffinityScoreWeight())
 }
 
 func TestOperator_SchedulerSetConfiguration(t *testing.T) {
@@ -55,6 +57,8 @@ func TestOperator_SchedulerSetConfiguration(t *testing.T) {
 	defer s.Stop()
 
 	minAffinitySpreadScoreNodes := 200
+	binpackScoreWeight := 0.5
+	deviceAffinityScoreWeight := 0.0
 	newSchedulerConfig := SchedulerConfiguration{
 		SchedulerAlgorithm: SchedulerAlgorithmSpread,
 		PreemptionConfig: PreemptionConfig{
@@ -67,6 +71,8 @@ func TestOperator_SchedulerSetConfiguration(t *testing.T) {
 		RejectJobRegistration:         true,
 		PauseEvalBroker:               true,
 		MinAffinitySpreadScoreNodes:   &minAffinitySpreadScoreNodes,
+		BinpackScoreWeight:            &binpackScoreWeight,
+		DeviceAffinityScoreWeight:     &deviceAffinityScoreWeight,
 	}
 
 	schedulerConfigUpdateResp, _, err := c.Operator().SchedulerSetConfiguration(&newSchedulerConfig, nil)
@@ -82,6 +88,8 @@ func TestOperator_SchedulerSetConfiguration(t *testing.T) {
 	must.True(t, schedulerConfig.SchedulerConfig.MemoryOversubscriptionEnabled)
 	must.Eq(t, schedulerConfig.SchedulerConfig.PreemptionConfig, newSchedulerConfig.PreemptionConfig)
 	must.Eq(t, 200, schedulerConfig.SchedulerConfig.EffectiveMinAffinitySpreadScoreNodes())
+	must.Eq(t, 0.5, schedulerConfig.SchedulerConfig.EffectiveBinpackScoreWeight())
+	must.Eq(t, 0.0, schedulerConfig.SchedulerConfig.EffectiveDeviceAffinityScoreWeight())
 }
 
 func TestOperator_AutopilotState(t *testing.T) {

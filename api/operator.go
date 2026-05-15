@@ -189,6 +189,16 @@ type SchedulerConfiguration struct {
 	// generic scheduler when a task group uses affinity or spread rules.
 	MinAffinitySpreadScoreNodes *int
 
+	// BinpackScoreWeight scales the binpack score before it is combined with
+	// other scheduler scores. Values greater than 1 are allowed. If unset, the
+	// default weight is used.
+	BinpackScoreWeight *float64
+
+	// DeviceAffinityScoreWeight scales the device affinity score before it is
+	// combined with other scheduler scores. Values greater than 1 are allowed. If
+	// unset, the default weight is used.
+	DeviceAffinityScoreWeight *float64
+
 	// CreateIndex/ModifyIndex store the create/modify indexes of this configuration.
 	CreateIndex uint64
 	ModifyIndex uint64
@@ -202,6 +212,26 @@ func (s *SchedulerConfiguration) EffectiveMinAffinitySpreadScoreNodes() int {
 	}
 
 	return *s.MinAffinitySpreadScoreNodes
+}
+
+// EffectiveBinpackScoreWeight returns the configured binpack score weight, or
+// the default when unset.
+func (s *SchedulerConfiguration) EffectiveBinpackScoreWeight() float64 {
+	if s == nil || s.BinpackScoreWeight == nil {
+		return 1.0
+	}
+
+	return *s.BinpackScoreWeight
+}
+
+// EffectiveDeviceAffinityScoreWeight returns the configured device affinity
+// score weight, or the default when unset.
+func (s *SchedulerConfiguration) EffectiveDeviceAffinityScoreWeight() float64 {
+	if s == nil || s.DeviceAffinityScoreWeight == nil {
+		return 1.0
+	}
+
+	return *s.DeviceAffinityScoreWeight
 }
 
 // SchedulerConfigurationResponse is the response object that wraps SchedulerConfiguration

@@ -655,6 +655,8 @@ func DefaultConfig() *Config {
 				ServiceSchedulerEnabled:  false,
 			},
 			MinAffinitySpreadScoreNodes: pointer.Of(structs.DefaultMinAffinitySpreadScoreNodes),
+			BinpackScoreWeight:          pointer.Of(structs.DefaultBinpackScoreWeight),
+			DeviceAffinityScoreWeight:   pointer.Of(structs.DefaultDeviceAffinityScoreWeight),
 		},
 		DeploymentQueryRateLimit: deploymentwatcher.LimitStateQueriesPerSecond,
 		JobDefaultPriority:       structs.JobDefaultPriority,

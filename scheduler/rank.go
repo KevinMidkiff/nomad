@@ -159,15 +159,17 @@ func (iter *StaticRankIterator) Reset() {
 // BinPackIterator is a RankIterator that scores potential options
 // based on a bin-packing algorithm.
 type BinPackIterator struct {
-	ctx                    Context
-	source                 RankIterator
-	evict                  bool
-	priority               int
-	jobId                  structs.NamespacedID
-	taskGroup              *structs.TaskGroup
-	memoryOversubscription bool
-	scoreFit               func(*structs.Node, *structs.ComparableResources) float64
-	schedulerAlgorithm     structs.SchedulerAlgorithm
+	ctx                       Context
+	source                    RankIterator
+	evict                     bool
+	priority                  int
+	jobId                     structs.NamespacedID
+	taskGroup                 *structs.TaskGroup
+	memoryOversubscription    bool
+	scoreFit                  func(*structs.Node, *structs.ComparableResources) float64
+	schedulerAlgorithm        structs.SchedulerAlgorithm
+	binpackScoreWeight        float64
+	deviceAffinityScoreWeight float64
 }
 
 // NewBinPackIterator returns a BinPackIterator which tries to fit tasks
@@ -181,8 +183,10 @@ func NewBinPackIterator(ctx Context, source RankIterator, evict bool, priority i
 
 		// These are default values that may be overwritten by
 		// SetSchedulerConfiguration.
-		memoryOversubscription: false,
-		scoreFit:               structs.ScoreFitBinPack,
+		memoryOversubscription:    false,
+		scoreFit:                  structs.ScoreFitBinPack,
+		binpackScoreWeight:        structs.DefaultBinpackScoreWeight,
+		deviceAffinityScoreWeight: structs.DefaultDeviceAffinityScoreWeight,
 	}
 }
 
@@ -219,6 +223,9 @@ func (iter *BinPackIterator) SetSchedulerConfiguration(schedConfig *structs.Sche
 
 	// Set memory oversubscription.
 	iter.memoryOversubscription = schedConfig != nil && schedConfig.MemoryOversubscriptionEnabled
+
+	iter.binpackScoreWeight = schedConfig.EffectiveBinpackScoreWeight()
+	iter.deviceAffinityScoreWeight = schedConfig.EffectiveDeviceAffinityScoreWeight()
 }
 
 func (iter *BinPackIterator) Next() *RankedNode {
@@ -782,14 +789,20 @@ NEXTNODE:
 		// Score the fit normally otherwise
 		fitness := iter.scoreFit(option.Node, util)
 		normalizedFit := fitness / binPackingMaxFitScore
-		option.Scores = append(option.Scores, normalizedFit)
+		weightedFit := normalizedFit * iter.binpackScoreWeight
+		if iter.binpackScoreWeight > 0 {
+			option.Scores = append(option.Scores, weightedFit)
+		}
 		iter.ctx.Metrics().ScoreNode(option.Node, "binpack", normalizedFit)
 
 		// Score the device affinity
 		if totalDeviceAffinityWeight != 0 {
-			sumMatchingAffinities /= totalDeviceAffinityWeight
-			option.Scores = append(option.Scores, sumMatchingAffinities)
-			iter.ctx.Metrics().ScoreNode(option.Node, "devices", sumMatchingAffinities)
+			deviceAffinityScore := sumMatchingAffinities / totalDeviceAffinityWeight
+			weightedDeviceAffinity := deviceAffinityScore * iter.deviceAffinityScoreWeight
+			if iter.deviceAffinityScoreWeight > 0 {
+				option.Scores = append(option.Scores, weightedDeviceAffinity)
+			}
+			iter.ctx.Metrics().ScoreNode(option.Node, "devices", deviceAffinityScore)
 		}
 
 		return option

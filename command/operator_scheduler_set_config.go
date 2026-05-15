@@ -26,6 +26,8 @@ type OperatorSchedulerSetConfig struct {
 	checkIndex                  string
 	schedulerAlgorithm          string
 	minAffinitySpreadScoreNodes int
+	binpackScoreWeight          flagHelper.NonNegativeFloat64Value
+	deviceAffinityScoreWeight   flagHelper.NonNegativeFloat64Value
 	memoryOversubscription      flagHelper.BoolValue
 	rejectJobRegistration       flagHelper.BoolValue
 	pauseEvalBroker             flagHelper.BoolValue
@@ -44,6 +46,8 @@ func (o *OperatorSchedulerSetConfig) AutocompleteFlags() complete.Flags {
 				string(api.SchedulerAlgorithmSpread),
 			),
 			"-min-affinity-spread-score-nodes": complete.PredictAnything,
+			"-binpack-score-weight":            complete.PredictAnything,
+			"-device-affinity-score-weight":    complete.PredictAnything,
 			"-memory-oversubscription":         complete.PredictSet("true", "false"),
 			"-reject-job-registration":         complete.PredictSet("true", "false"),
 			"-pause-eval-broker":               complete.PredictSet("true", "false"),
@@ -70,6 +74,8 @@ func (o *OperatorSchedulerSetConfig) Run(args []string) int {
 	flags.StringVar(&o.checkIndex, "check-index", "", "")
 	flags.StringVar(&o.schedulerAlgorithm, "scheduler-algorithm", "", "")
 	flags.IntVar(&o.minAffinitySpreadScoreNodes, "min-affinity-spread-score-nodes", -1, "")
+	flags.Var(&o.binpackScoreWeight, "binpack-score-weight", "")
+	flags.Var(&o.deviceAffinityScoreWeight, "device-affinity-score-weight", "")
 	flags.Var(&o.memoryOversubscription, "memory-oversubscription", "")
 	flags.Var(&o.rejectJobRegistration, "reject-job-registration", "")
 	flags.Var(&o.pauseEvalBroker, "pause-eval-broker", "")
@@ -135,6 +141,8 @@ func (o *OperatorSchedulerSetConfig) Run(args []string) int {
 	if o.minAffinitySpreadScoreNodes >= 0 {
 		schedulerConfig.MinAffinitySpreadScoreNodes = pointer.Of(o.minAffinitySpreadScoreNodes)
 	}
+	o.binpackScoreWeight.Merge(&schedulerConfig.BinpackScoreWeight)
+	o.deviceAffinityScoreWeight.Merge(&schedulerConfig.DeviceAffinityScoreWeight)
 	o.memoryOversubscription.Merge(&schedulerConfig.MemoryOversubscriptionEnabled)
 	o.rejectJobRegistration.Merge(&schedulerConfig.RejectJobRegistration)
 	o.pauseEvalBroker.Merge(&schedulerConfig.PauseEvalBroker)
@@ -189,6 +197,18 @@ Scheduler Set Config Options:
     Specifies the minimum number of nodes the generic scheduler scores when a
     task group uses affinity or spread rules. The scheduler still evaluates at
     least the task group count when it is larger than this value.
+
+  -binpack-score-weight=<float>
+    Multiplies the binpack score before it is averaged with other scheduler
+    scores. If set to 0, the binpack score is recorded in placement metrics but
+    excluded from final score averaging. Values greater than 1 are allowed.
+    Must be greater than or equal to 0.
+
+  -device-affinity-score-weight=<float>
+    Multiplies the device affinity score before it is averaged with other
+    scheduler scores. If set to 0, the device affinity score is recorded in
+    placement metrics but excluded from final score averaging. Values greater
+    than 1 are allowed. Must be greater than or equal to 0.
 
   -memory-oversubscription=[true|false]
     When true, tasks may exceed their reserved memory limit, if the client has

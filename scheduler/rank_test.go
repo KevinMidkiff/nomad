@@ -11,6 +11,7 @@ import (
 	"github.com/hashicorp/nomad/client/lib/idset"
 	"github.com/hashicorp/nomad/client/lib/numalib"
 	"github.com/hashicorp/nomad/client/lib/numalib/hw"
+	"github.com/hashicorp/nomad/helper/pointer"
 	"github.com/hashicorp/nomad/helper/uuid"
 	"github.com/hashicorp/nomad/nomad/mock"
 	"github.com/hashicorp/nomad/nomad/structs"
@@ -1965,6 +1966,70 @@ func TestBinPackIterator_Devices(t *testing.T) {
 	}
 }
 
+func TestBinPackIterator_DeviceAffinityScoreWeight(t *testing.T) {
+	node := mock.NvidiaNode()
+	tg := &structs.TaskGroup{
+		EphemeralDisk: &structs.EphemeralDisk{},
+		Tasks: []*structs.Task{
+			{
+				Name: "web",
+				Resources: &structs.Resources{
+					CPU:      1024,
+					MemoryMB: 1024,
+					Devices: []*structs.RequestedDevice{
+						{
+							Name:  "nvidia/gpu",
+							Count: 1,
+							Affinities: []*structs.Affinity{
+								{
+									LTarget: "${device.attr.graphics_clock}",
+									Operand: ">",
+									RTarget: "1.4 GHz",
+									Weight:  90,
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	for _, task := range tg.Tasks {
+		task.Resources.Canonicalize()
+	}
+
+	t.Run("scales device affinity score", func(t *testing.T) {
+		_, ctx := testContext(t)
+		static := NewStaticRankIterator(ctx, []*RankedNode{{Node: node}})
+		binp := NewBinPackIterator(ctx, static, false, 0)
+		binp.SetTaskGroup(tg)
+		binp.SetSchedulerConfiguration(&structs.SchedulerConfiguration{
+			SchedulerAlgorithm:        structs.SchedulerAlgorithmBinpack,
+			DeviceAffinityScoreWeight: pointer.Of(0.5),
+		})
+
+		out := binp.Next()
+		must.NotNil(t, out)
+		must.Len(t, 2, out.Scores)
+		must.Eq(t, 0.5, out.Scores[1])
+	})
+
+	t.Run("zero skips device affinity score", func(t *testing.T) {
+		_, ctx := testContext(t)
+		static := NewStaticRankIterator(ctx, []*RankedNode{{Node: node}})
+		binp := NewBinPackIterator(ctx, static, false, 0)
+		binp.SetTaskGroup(tg)
+		binp.SetSchedulerConfiguration(&structs.SchedulerConfiguration{
+			SchedulerAlgorithm:        structs.SchedulerAlgorithmBinpack,
+			DeviceAffinityScoreWeight: pointer.Of(0.0),
+		})
+
+		out := binp.Next()
+		must.NotNil(t, out)
+		must.Len(t, 1, out.Scores)
+	})
+}
+
 // Tests that bin packing iterator fails due to overprovisioning of devices
 // This test has devices at task level
 func TestBinPackIterator_Device_Failure_With_Eviction(t *testing.T) {
@@ -2511,6 +2576,55 @@ func TestNodeAffinityIterator(t *testing.T) {
 		test.Len(t, 2, out[4].Scores)
 		test.Less(t, out[0].FinalScore, out[4].FinalScore)
 		test.Less(t, out[3].FinalScore, out[4].FinalScore)
+	})
+
+	t.Run("affinity with weighted binpack", func(t *testing.T) {
+		nodes := testNodes()
+		static := NewStaticRankIterator(ctx, nodes)
+
+		binp := NewBinPackIterator(ctx, static, false, 0)
+		binp.SetTaskGroup(tg)
+		binp.SetSchedulerConfiguration(&structs.SchedulerConfiguration{
+			SchedulerAlgorithm: structs.SchedulerAlgorithmBinpack,
+			BinpackScoreWeight: pointer.Of(0.5),
+		})
+		fit := structs.ScoreFitBinPack(nodes[0].Node, &structs.ComparableResources{
+			Flattened: structs.AllocatedTaskResources{
+				Cpu:    structs.AllocatedCpuResources{CpuShares: 500},
+				Memory: structs.AllocatedMemoryResources{MemoryMB: 256},
+			},
+		})
+		bp := fit / binPackingMaxFitScore * 0.5
+
+		nodeAffinity := NewNodeAffinityIterator(ctx, binp)
+		nodeAffinity.SetTaskGroup(tg)
+
+		scoreNorm := NewScoreNormalizationIterator(ctx, nodeAffinity)
+		out := collectRanked(scoreNorm)
+
+		test.Eq(t, (0.5+bp)/2, out[0].FinalScore)
+		test.Len(t, 2, out[0].Scores)
+	})
+
+	t.Run("affinity with zero binpack", func(t *testing.T) {
+		nodes := testNodes()
+		static := NewStaticRankIterator(ctx, nodes)
+
+		binp := NewBinPackIterator(ctx, static, false, 0)
+		binp.SetTaskGroup(tg)
+		binp.SetSchedulerConfiguration(&structs.SchedulerConfiguration{
+			SchedulerAlgorithm: structs.SchedulerAlgorithmBinpack,
+			BinpackScoreWeight: pointer.Of(0.0),
+		})
+
+		nodeAffinity := NewNodeAffinityIterator(ctx, binp)
+		nodeAffinity.SetTaskGroup(tg)
+
+		scoreNorm := NewScoreNormalizationIterator(ctx, nodeAffinity)
+		out := collectRanked(scoreNorm)
+
+		test.Eq(t, 0.5, out[0].FinalScore)
+		test.Len(t, 1, out[0].Scores)
 	})
 }
 

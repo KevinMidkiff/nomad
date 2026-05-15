@@ -496,6 +496,8 @@ func TestOperator_SchedulerSetConfiguration(t *testing.T) {
 		body := bytes.NewBuffer([]byte(`
 {
   "MinAffinitySpreadScoreNodes": 200,
+  "BinpackScoreWeight": 0.5,
+  "DeviceAffinityScoreWeight": 0,
   "MemoryOversubscriptionEnabled": true,
   "PauseEvalBroker": true,
   "PreemptionConfig": {
@@ -526,6 +528,8 @@ func TestOperator_SchedulerSetConfiguration(t *testing.T) {
 		require.False(t, reply.SchedulerConfig.PreemptionConfig.BatchSchedulerEnabled)
 		require.True(t, reply.SchedulerConfig.PreemptionConfig.ServiceSchedulerEnabled)
 		require.Equal(t, 200, reply.SchedulerConfig.EffectiveMinAffinitySpreadScoreNodes())
+		require.Equal(t, 0.5, reply.SchedulerConfig.EffectiveBinpackScoreWeight())
+		require.Equal(t, 0.0, reply.SchedulerConfig.EffectiveDeviceAffinityScoreWeight())
 		require.True(t, reply.SchedulerConfig.MemoryOversubscriptionEnabled)
 		require.True(t, reply.SchedulerConfig.PauseEvalBroker)
 	})

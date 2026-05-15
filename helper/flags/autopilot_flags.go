@@ -8,6 +8,7 @@ package flags
 
 import (
 	"fmt"
+	"math"
 	"math/bits"
 	"strconv"
 	"time"
@@ -40,6 +41,42 @@ func (b *BoolValue) String() string {
 	var current bool
 	if b.v != nil {
 		current = *(b.v)
+	}
+	return fmt.Sprintf("%v", current)
+}
+
+// NonNegativeFloat64Value provides a finite, non-negative float64 flag value
+// that's aware if it has been set.
+type NonNegativeFloat64Value struct {
+	v *float64
+}
+
+// Merge will overlay this value if it has been set.
+func (f *NonNegativeFloat64Value) Merge(onto **float64) {
+	if f.v != nil {
+		v := *f.v
+		*onto = &v
+	}
+}
+
+// Set implements the flag.Value interface.
+func (f *NonNegativeFloat64Value) Set(v string) error {
+	parsed, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		return err
+	}
+	if parsed < 0 || math.IsNaN(parsed) || math.IsInf(parsed, 0) {
+		return fmt.Errorf("must be a finite float greater than or equal to 0")
+	}
+	f.v = &parsed
+	return nil
+}
+
+// String implements the flag.Value interface.
+func (f *NonNegativeFloat64Value) String() string {
+	var current float64
+	if f.v != nil {
+		current = *(f.v)
 	}
 	return fmt.Sprintf("%v", current)
 }
