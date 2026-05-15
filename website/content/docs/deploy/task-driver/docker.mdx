@@ -97,6 +97,7 @@ plugin "docker" {
 
     allow_privileged = false
     allow_caps       = ["chown", "net_raw"]
+    default_cap_add  = ["ipc_lock"]
   }
 }
 ```
@@ -144,6 +145,10 @@ plugin "docker" {
 !> **Warning:** Allowing more capabilities beyond the default may lead to
 undesirable consequences, including untrusted tasks being able to compromise the
 host system.
+
+- `default_cap_add` - A list of Linux capabilities to add to every Docker task
+  on the client. Each capability must be allowed by `allow_caps`. Task-level
+  `cap_add` entries are applied in addition to this list.
 
 - `allow_runtimes` - defaults to `["runc", "nvidia"]` - A list of the allowed
   docker runtimes a task may use.

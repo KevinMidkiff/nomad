@@ -1651,6 +1651,108 @@ func TestDockerDriver_Capabilities(t *testing.T) {
 	}
 }
 
+func TestDockerDriver_DefaultCapAdd(t *testing.T) {
+	ci.Parallel(t)
+	testutil.DockerCompatible(t)
+	if runtime.GOOS == "windows" {
+		t.Skip("Capabilities not supported on windows")
+	}
+
+	testCases := []struct {
+		Name          string
+		DefaultCapAdd []string
+		AllowCaps     []string
+		CapDrop       []string
+		StartError    string
+		ExpectedAdd   []string
+		ExpectedDrop  []string
+	}{
+		{
+			Name:          "adds configured default capability",
+			DefaultCapAdd: []string{"ipc_lock"},
+			AllowCaps:     []string{"all"},
+			ExpectedAdd:   []string{"ipc_lock"},
+		},
+		{
+			Name:          "default capability honors allowlist",
+			DefaultCapAdd: []string{"ipc_lock"},
+			AllowCaps:     []string{"chown"},
+			StartError:    "ipc_lock",
+		},
+		{
+			Name:          "default capability is added back after drop all",
+			DefaultCapAdd: []string{"ipc_lock"},
+			AllowCaps:     []string{"all"},
+			CapDrop:       []string{"all"},
+			ExpectedAdd:   []string{"ipc_lock"},
+			ExpectedDrop:  []string{"all"},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.Name, func(t *testing.T) {
+			client := newTestDockerClient(t)
+			task, cfg, _ := dockerTask(t)
+
+			if len(tc.CapDrop) > 0 {
+				cfg.CapDrop = tc.CapDrop
+			}
+			must.NoError(t, task.EncodeConcreteDriverConfig(cfg))
+
+			d := dockerDriverHarness(t, nil)
+			dockerDriver, ok := d.Impl().(*Driver)
+			must.True(t, ok)
+			dockerDriver.config.AllowCaps = tc.AllowCaps
+			dockerDriver.config.DefaultCapAdd = tc.DefaultCapAdd
+
+			cleanup := d.MkAllocDir(task, true)
+			defer cleanup()
+			copyImage(t, task.TaskDir(), cfg.LoadImage)
+
+			_, _, err := d.StartTask(task)
+			if err != nil {
+				if tc.StartError == "" {
+					must.NoError(t, err)
+				} else {
+					must.StrContains(t, err.Error(), tc.StartError)
+				}
+				return
+			}
+			defer d.DestroyTask(task.ID, true)
+			if tc.StartError != "" {
+				t.Fatalf("Expected error in start: %v", tc.StartError)
+			}
+
+			handle, ok := dockerDriver.tasks.Get(task.ID)
+			must.True(t, ok)
+
+			must.NoError(t, d.WaitUntilStarted(task.ID, 5*time.Second))
+
+			container, err := client.ContainerInspect(context.Background(), handle.containerID)
+			must.NoError(t, err)
+
+			containsCap := func(caps []string, want string) bool {
+				normalizeCap := func(cap string) string {
+					return strings.TrimPrefix(strings.ToLower(cap), "cap_")
+				}
+				for _, got := range caps {
+					if normalizeCap(got) == normalizeCap(want) {
+						return true
+					}
+				}
+				return false
+			}
+
+			for _, cap := range tc.ExpectedAdd {
+				must.True(t, containsCap(container.HostConfig.CapAdd, cap))
+			}
+			for _, cap := range tc.ExpectedDrop {
+				must.True(t, containsCap(container.HostConfig.CapDrop, cap))
+			}
+		})
+	}
+}
+
 func TestDockerDriver_DNS(t *testing.T) {
 	ci.Parallel(t)
 	testutil.DockerCompatible(t)

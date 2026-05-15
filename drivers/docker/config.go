@@ -183,6 +183,7 @@ var (
 	//		}
 	//		allow_privileged = false
 	//		allow_caps = ["CHOWN", "NET_RAW" ... ]
+	//		default_cap_add = ["IPC_LOCK"]
 	//		nvidia_runtime = "nvidia"
 	//		}
 	//	}
@@ -264,6 +265,7 @@ var (
 			hclspec.NewAttr("allow_caps", "list(string)", false),
 			hclspec.NewLiteral(capabilities.HCLSpecLiteral),
 		),
+		"default_cap_add": hclspec.NewAttr("default_cap_add", "list(string)", false),
 		"nvidia_runtime": hclspec.NewDefault(
 			hclspec.NewAttr("nvidia_runtime", "string", false),
 			hclspec.NewLiteral(`"nvidia"`),
@@ -673,6 +675,7 @@ type DriverConfig struct {
 	Volumes                            VolumeConfig  `codec:"volumes"`
 	AllowPrivileged                    bool          `codec:"allow_privileged"`
 	AllowCaps                          []string      `codec:"allow_caps"`
+	DefaultCapAdd                      []string      `codec:"default_cap_add"`
 	GPURuntimeName                     string        `codec:"nvidia_runtime"`
 	InfraImage                         string        `codec:"infra_image"`
 	InfraImagePullTimeout              string        `codec:"infra_image_pull_timeout"`

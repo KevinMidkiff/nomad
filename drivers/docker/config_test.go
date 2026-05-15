@@ -625,6 +625,35 @@ func TestConfig_DriverConfig_WindowsAllowInsecureContainerAdmin(t *testing.T) {
 	}
 }
 
+func TestConfig_DriverConfig_DefaultCapAdd(t *testing.T) {
+	ci.Parallel(t)
+
+	cases := []struct {
+		name     string
+		config   string
+		expected []string
+	}{
+		{
+			name:     "default",
+			config:   `{}`,
+			expected: nil,
+		},
+		{
+			name:     "set explicitly",
+			config:   `{ default_cap_add = ["ipc_lock", "sys_nice"] }`,
+			expected: []string{"ipc_lock", "sys_nice"},
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var tc DriverConfig
+			hclutils.NewConfigParser(configSpec).ParseHCL(t, "config "+c.config, &tc)
+			require.Equal(t, c.expected, tc.DefaultCapAdd)
+		})
+	}
+}
+
 func TestConfig_DriverConfig_InfraImagePullTimeout(t *testing.T) {
 	ci.Parallel(t)
 
