@@ -1,0 +1,3 @@
+```release-note:feature
+scheduler: Add greedy preemption mode (`PreemptionConfig.GreedyPreemptionEnabled`) that lets non-greedy service- and batch-type allocs evict allocs whose job has `meta.greedy="true"`, regardless of priority delta. Suppresses the auto follow-up preemption eval for greedy jobs so external schedulers can place them without racing Nomad.
+```
