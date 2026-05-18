@@ -933,7 +933,7 @@ func (s *GenericScheduler) selectNextOption(tg *structs.TaskGroup, selectOptions
 	// independently of the other *SchedulerEnabled flags. Skip if the
 	// incoming job is itself greedy to prevent greedy-evicts-greedy thrash.
 	greedyEnabled := schedConfig != nil && schedConfig.PreemptionConfig.GreedyPreemptionEnabled
-	if option == nil && greedyEnabled && !isGreedyJob(s.job) {
+	if option == nil && greedyEnabled && !s.job.IsGreedy() {
 		selectOptions.Preempt = false
 		selectOptions.PreemptGreedy = true
 		option = s.stack.Select(tg, selectOptions)

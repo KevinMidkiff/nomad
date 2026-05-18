@@ -164,7 +164,7 @@ type BinPackIterator struct {
 	evict  bool
 
 	// evictGreedyOnly, when set, permits eviction of allocs whose job is
-	// marked greedy (see JobMetaGreedy) without enabling general preemption.
+	// marked greedy (see structs.JobMetaGreedy) without enabling general preemption.
 	// Independent of evict — at most one is typically set per Select call,
 	// driven by SelectOptions.Preempt and SelectOptions.PreemptGreedy. When
 	// evictGreedyOnly is set, the Preemptor restricts candidates to greedy

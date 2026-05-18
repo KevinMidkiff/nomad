@@ -1596,7 +1596,7 @@ func greedyGPUJob(priority int, greedy bool) *structs.Job {
 		if j.Meta == nil {
 			j.Meta = map[string]string{}
 		}
-		j.Meta[JobMetaGreedy] = "true"
+		j.Meta[structs.JobMetaGreedy] = "true"
 	}
 	return j
 }

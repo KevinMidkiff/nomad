@@ -22,7 +22,24 @@ const (
 	// Args: JobServiceRegistrationsRequest
 	// Reply: JobServiceRegistrationsResponse
 	JobServiceRegistrationsRPCMethod = "Job.GetServiceRegistrations"
+
+	// JobMetaGreedy is the job meta key that marks a job as "greedy".
+	// Allocs from a greedy job are evictable by any non-greedy alloc that
+	// needs their resources, regardless of priority delta — see the
+	// greedy-only preemption pass gated on
+	// PreemptionConfig.GreedyPreemptionEnabled.
+	JobMetaGreedy = "greedy"
 )
+
+// IsGreedy reports whether the job is marked greedy via its meta. Nil-safe.
+func (j *Job) IsGreedy() bool {
+	return j != nil && j.Meta[JobMetaGreedy] == "true"
+}
+
+// IsGreedy reports whether the allocation's job is marked greedy. Nil-safe.
+func (a *Allocation) IsGreedy() bool {
+	return a != nil && a.Job.IsGreedy()
+}
 
 // JobBatchDeregisterRequest is used to batch deregister jobs and upsert
 // evaluations.

@@ -340,7 +340,7 @@ func (p *planner) applyPlan(plan *structs.Plan, result *structs.PlanResult, snap
 		if job != nil {
 			// Greedy jobs (meta.greedy="true") are placed by an external scheduler;
 			// suppress the auto follow-up eval so Nomad doesn't compete with it.
-			if greedyEnabled && job.Meta["greedy"] == "true" {
+			if greedyEnabled && job.IsGreedy() {
 				continue
 			}
 			eval := &structs.Evaluation{

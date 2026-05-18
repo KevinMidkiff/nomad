@@ -12910,7 +12910,7 @@ func (p *Plan) AppendPreemptedAlloc(alloc *Allocation, preemptingAllocID string)
 	newAlloc.PreemptedByAllocation = preemptingAllocID
 
 	var desiredDesc string
-	if alloc.Job != nil && alloc.Job.Meta["greedy"] == "true" {
+	if alloc.IsGreedy() {
 		desiredDesc = fmt.Sprintf("Greedy alloc evicted for alloc ID %v", preemptingAllocID)
 	} else {
 		desiredDesc = fmt.Sprintf("Preempted by alloc ID %v", preemptingAllocID)

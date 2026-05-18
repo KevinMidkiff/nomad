@@ -130,7 +130,7 @@ type Preemptor struct {
 	currentAllocs []*structs.Allocation
 
 	// greedyOnly, when set, restricts preemption candidates to allocs whose
-	// job is marked greedy (see JobMetaGreedy) and bypasses the
+	// job is marked greedy (see structs.JobMetaGreedy) and bypasses the
 	// priority-delta-of-10 rule. Used by the greedy-only preemption pass.
 	greedyOnly bool
 
@@ -353,7 +353,7 @@ func (p *Preemptor) PreemptForNetwork(networkResourceAsk *structs.NetworkResourc
 		// non-greedy in greedy-only mode.
 		var ineligible bool
 		if p.greedyOnly {
-			ineligible = !isGreedyAlloc(alloc)
+			ineligible = !alloc.IsGreedy()
 		} else {
 			ineligible = p.jobPriority-alloc.Job.Priority < 10
 		}
@@ -722,7 +722,7 @@ func filterAndGroupPreemptibleAllocs(jobPriority int, current []*structs.Allocat
 		if greedyOnly {
 			// In greedy-only mode, the priority-delta rule does not apply.
 			// Only greedy allocs are eligible.
-			if !isGreedyAlloc(alloc) {
+			if !alloc.IsGreedy() {
 				continue
 			}
 		} else {
