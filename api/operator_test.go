@@ -66,6 +66,7 @@ func TestOperator_SchedulerSetConfiguration(t *testing.T) {
 			SysBatchSchedulerEnabled: true,
 			BatchSchedulerEnabled:    true,
 			ServiceSchedulerEnabled:  true,
+			GreedyPreemptionEnabled:  true,
 		},
 		MemoryOversubscriptionEnabled: true,
 		RejectJobRegistration:         true,

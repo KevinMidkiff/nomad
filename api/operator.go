@@ -268,6 +268,13 @@ type PreemptionConfig struct {
 	SysBatchSchedulerEnabled bool
 	BatchSchedulerEnabled    bool
 	ServiceSchedulerEnabled  bool
+
+	// GreedyPreemptionEnabled toggles the greedy-only preemption pass.
+	// When true, allocs whose job has meta.greedy="true" are preemptible
+	// by any non-greedy alloc that needs their resources, regardless of
+	// the priority-delta-of-10 rule and independently of the other
+	// *SchedulerEnabled flags. Only fires for service and batch jobs.
+	GreedyPreemptionEnabled bool
 }
 
 // SchedulerGetConfiguration is used to query the current Scheduler configuration.
