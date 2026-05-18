@@ -35,6 +35,7 @@ type OperatorSchedulerSetConfig struct {
 	preemptServiceScheduler     flagHelper.BoolValue
 	preemptSysBatchScheduler    flagHelper.BoolValue
 	preemptSystemScheduler      flagHelper.BoolValue
+	preemptGreedy               flagHelper.BoolValue
 }
 
 func (o *OperatorSchedulerSetConfig) AutocompleteFlags() complete.Flags {
@@ -55,6 +56,7 @@ func (o *OperatorSchedulerSetConfig) AutocompleteFlags() complete.Flags {
 			"-preempt-service-scheduler":       complete.PredictSet("true", "false"),
 			"-preempt-sysbatch-scheduler":      complete.PredictSet("true", "false"),
 			"-preempt-system-scheduler":        complete.PredictSet("true", "false"),
+			"-preempt-greedy":                  complete.PredictSet("true", "false"),
 		},
 	)
 }
@@ -83,6 +85,7 @@ func (o *OperatorSchedulerSetConfig) Run(args []string) int {
 	flags.Var(&o.preemptServiceScheduler, "preempt-service-scheduler", "")
 	flags.Var(&o.preemptSysBatchScheduler, "preempt-sysbatch-scheduler", "")
 	flags.Var(&o.preemptSystemScheduler, "preempt-system-scheduler", "")
+	flags.Var(&o.preemptGreedy, "preempt-greedy", "")
 
 	if err := flags.Parse(args); err != nil {
 		return 1
@@ -150,6 +153,7 @@ func (o *OperatorSchedulerSetConfig) Run(args []string) int {
 	o.preemptServiceScheduler.Merge(&schedulerConfig.PreemptionConfig.ServiceSchedulerEnabled)
 	o.preemptSysBatchScheduler.Merge(&schedulerConfig.PreemptionConfig.SysBatchSchedulerEnabled)
 	o.preemptSystemScheduler.Merge(&schedulerConfig.PreemptionConfig.SystemSchedulerEnabled)
+	o.preemptGreedy.Merge(&schedulerConfig.PreemptionConfig.GreedyPreemptionEnabled)
 
 	// Check-and-set the new configuration.
 	result, _, err := client.Operator().SchedulerCASConfiguration(schedulerConfig, nil)
@@ -241,6 +245,13 @@ Scheduler Set Config Options:
   -preempt-system-scheduler=[true|false]
     Specifies whether preemption for system jobs is enabled. Note that if this
     is set to true, then system jobs can preempt any other jobs.
+
+  -preempt-greedy=[true|false]
+    Specifies whether greedy preemption is enabled. When true, allocs whose
+    job has meta.greedy="true" are preemptible by any non-greedy alloc that
+    needs their resources, regardless of priority delta and independently of
+    the other -preempt-*-scheduler flags. Only fires for service and batch
+    jobs.
 `
 	return strings.TrimSpace(helpText)
 }
