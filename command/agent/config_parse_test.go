@@ -157,6 +157,7 @@ var basicConfig = &Config{
 				SystemSchedulerEnabled:  true,
 				BatchSchedulerEnabled:   true,
 				ServiceSchedulerEnabled: true,
+				GreedyPreemptionEnabled: true,
 			},
 		},
 		LicensePath:        "/tmp/nomad.hclic",

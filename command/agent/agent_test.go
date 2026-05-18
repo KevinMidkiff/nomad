@@ -220,6 +220,7 @@ func TestAgent_ServerConfig_SchedulerFlags(t *testing.T) {
 					SystemSchedulerEnabled:  true,
 					BatchSchedulerEnabled:   true,
 					ServiceSchedulerEnabled: true,
+					GreedyPreemptionEnabled: true,
 				},
 			},
 			structs.SchedulerConfiguration{
@@ -227,6 +228,20 @@ func TestAgent_ServerConfig_SchedulerFlags(t *testing.T) {
 					SystemSchedulerEnabled:  true,
 					BatchSchedulerEnabled:   true,
 					ServiceSchedulerEnabled: true,
+					GreedyPreemptionEnabled: true,
+				},
+			},
+		},
+		{
+			"greedy only",
+			&structs.SchedulerConfiguration{
+				PreemptionConfig: structs.PreemptionConfig{
+					GreedyPreemptionEnabled: true,
+				},
+			},
+			structs.SchedulerConfiguration{
+				PreemptionConfig: structs.PreemptionConfig{
+					GreedyPreemptionEnabled: true,
 				},
 			},
 		},

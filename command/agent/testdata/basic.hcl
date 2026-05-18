@@ -165,9 +165,10 @@ server {
     device_affinity_score_weight    = 0
 
     preemption_config {
-      batch_scheduler_enabled   = true
-      system_scheduler_enabled  = true
-      service_scheduler_enabled = true
+      batch_scheduler_enabled    = true
+      system_scheduler_enabled   = true
+      service_scheduler_enabled  = true
+      greedy_preemption_enabled  = true
     }
   }
 
