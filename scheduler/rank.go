@@ -159,9 +159,18 @@ func (iter *StaticRankIterator) Reset() {
 // BinPackIterator is a RankIterator that scores potential options
 // based on a bin-packing algorithm.
 type BinPackIterator struct {
-	ctx                       Context
-	source                    RankIterator
-	evict                     bool
+	ctx    Context
+	source RankIterator
+	evict  bool
+
+	// evictGreedyOnly, when set, permits eviction of allocs whose job is
+	// marked greedy (see structs.JobMetaGreedy) without enabling general preemption.
+	// Independent of evict — at most one is typically set per Select call,
+	// driven by SelectOptions.Preempt and SelectOptions.PreemptGreedy. When
+	// evictGreedyOnly is set, the Preemptor restricts candidates to greedy
+	// allocs and bypasses the priority-delta rule.
+	evictGreedyOnly bool
+
 	priority                  int
 	jobId                     structs.NamespacedID
 	taskGroup                 *structs.TaskGroup
@@ -299,6 +308,7 @@ NEXTNODE:
 		// Initialize preemptor with node
 		preemptor := NewPreemptor(iter.priority, iter.ctx, &iter.jobId)
 		preemptor.SetNode(option.Node)
+		preemptor.SetGreedyOnly(iter.evictGreedyOnly)
 
 		// Count the number of existing preemptions
 		allPreemptions := iter.ctx.Plan().NodePreemptions
@@ -335,8 +345,8 @@ NEXTNODE:
 			}
 			offer, err := netIdx.AssignPorts(ask)
 			if err != nil {
-				// If eviction is not enabled, mark this node as exhausted and continue
-				if !iter.evict {
+				// If eviction is not enabled (general or greedy-only), mark this node as exhausted and continue
+				if !iter.evict && !iter.evictGreedyOnly {
 					iter.ctx.Metrics().ExhaustedNode(option.Node,
 						fmt.Sprintf("network: %s", err))
 					netIdx.Release()
@@ -411,8 +421,8 @@ NEXTNODE:
 				ask := task.Resources.Networks[0].Copy()
 				offer, err := netIdx.AssignTaskNetwork(ask)
 				if offer == nil {
-					// If eviction is not enabled, mark this node as exhausted and continue
-					if !iter.evict {
+					// If eviction is not enabled (general or greedy-only), mark this node as exhausted and continue
+					if !iter.evict && !iter.evictGreedyOnly {
 						iter.ctx.Metrics().ExhaustedNode(option.Node,
 							fmt.Sprintf("network: %s", err))
 						netIdx.Release()
@@ -576,8 +586,8 @@ NEXTNODE:
 				// and devices WITH leveraging preemption. We will have already
 				// made attempts without preemption.
 
-				// If preemption is not enabled, then this node is exhausted.
-				if !iter.evict {
+				// If preemption (general or greedy-only) is not enabled, this node is exhausted.
+				if !iter.evict && !iter.evictGreedyOnly {
 					// surface err from createOffer()
 					iter.ctx.Metrics().ExhaustedNode(option.Node, fmt.Sprintf("devices: %s", err))
 					continue NEXTNODE
@@ -760,8 +770,8 @@ NEXTNODE:
 		fit, dim, util, _ := structs.AllocsFit(option.Node, proposed, netIdx, false)
 		netIdx.Release()
 		if !fit {
-			// Skip the node if evictions are not enabled
-			if !iter.evict {
+			// Skip the node if evictions are not enabled (general or greedy-only)
+			if !iter.evict && !iter.evictGreedyOnly {
 				iter.ctx.Metrics().ExhaustedNode(option.Node, dim)
 				continue
 			}

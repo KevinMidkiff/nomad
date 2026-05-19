@@ -1552,3 +1552,290 @@ func createAllocInner(id string, job *structs.Job, resource *structs.Resources, 
 	}
 	return alloc
 }
+
+// greedyGPUNode returns a node with `gpuCount` GPUs of type "gpu/nvidia/1080ti".
+func greedyGPUNode(t *testing.T, gpuCount int) *structs.Node {
+	t.Helper()
+	legacyCpuResources, processorResources := cpuResources(4000)
+	instances := make([]*structs.NodeDevice, gpuCount)
+	for i := 0; i < gpuCount; i++ {
+		instances[i] = &structs.NodeDevice{ID: fmt.Sprintf("dev%d", i), Healthy: true}
+	}
+	node := mock.Node()
+	node.NodeResources = &structs.NodeResources{
+		Processors: processorResources,
+		Cpu:        legacyCpuResources,
+		Memory:     structs.NodeMemoryResources{MemoryMB: 8192},
+		Disk:       structs.NodeDiskResources{DiskMB: 100 * 1024},
+		Networks: []*structs.NetworkResource{
+			{Device: "eth0", CIDR: "192.168.0.100/32", MBits: 1000},
+		},
+		Devices: []*structs.NodeDeviceResource{{
+			Type:      "gpu",
+			Vendor:    "nvidia",
+			Name:      "1080ti",
+			Instances: instances,
+		}},
+	}
+	return node
+}
+
+// greedyGPUJob builds a 1-GPU job (count=1). If greedy is true, sets meta.greedy="true".
+func greedyGPUJob(priority int, greedy bool) *structs.Job {
+	j := mock.Job()
+	j.Priority = priority
+	j.TaskGroups[0].Count = 1
+	j.TaskGroups[0].Networks = nil
+	j.TaskGroups[0].Tasks[0].Services = nil
+	j.TaskGroups[0].Tasks[0].Resources.Networks = nil
+	j.TaskGroups[0].Tasks[0].Resources.Devices = structs.ResourceDevices{{
+		Name:  "gpu",
+		Count: 1,
+	}}
+	if greedy {
+		if j.Meta == nil {
+			j.Meta = map[string]string{}
+		}
+		j.Meta[structs.JobMetaGreedy] = "true"
+	}
+	return j
+}
+
+// runJobEval submits the job + a pending JobRegister eval and runs the service scheduler.
+func runJobEval(t *testing.T, h *Harness, j *structs.Job) {
+	t.Helper()
+	must.NoError(t, h.State.UpsertJob(structs.MsgTypeTestSetup, h.NextIndex(), nil, j))
+	eval := &structs.Evaluation{
+		Namespace:   structs.DefaultNamespace,
+		ID:          uuid.Generate(),
+		Priority:    j.Priority,
+		TriggeredBy: structs.EvalTriggerJobRegister,
+		JobID:       j.ID,
+		Status:      structs.EvalStatusPending,
+	}
+	must.NoError(t, h.State.UpsertEvals(structs.MsgTypeTestSetup, h.NextIndex(), []*structs.Evaluation{eval}))
+	must.NoError(t, h.Process(NewServiceScheduler, eval))
+}
+
+// enableGreedyPreemption sets PreemptionConfig.GreedyPreemptionEnabled = true.
+// Combine extra options (e.g. ServiceSchedulerEnabled) by passing them in.
+func enableGreedyPreemption(t *testing.T, h *Harness, extra structs.PreemptionConfig) {
+	t.Helper()
+	extra.GreedyPreemptionEnabled = true
+	must.NoError(t, h.State.SchedulerSetConfig(h.NextIndex(), &structs.SchedulerConfiguration{
+		PreemptionConfig: extra,
+	}))
+}
+
+// TestPreemption_Greedy_DeviceEvictionWhenGeneralPreemptionDisabled verifies
+// the third pass: when general preemption is off (default for service jobs),
+// an incoming non-greedy job still evicts a greedy alloc to claim its GPU.
+func TestPreemption_Greedy_DeviceEvictionWhenGeneralPreemptionDisabled(t *testing.T) {
+	ci.Parallel(t)
+	h := NewHarness(t)
+
+	node := greedyGPUNode(t, 1)
+	must.NoError(t, h.State.UpsertNode(structs.MsgTypeTestSetup, h.NextIndex(), node))
+	enableGreedyPreemption(t, h, structs.PreemptionConfig{})
+
+	greedyJob := greedyGPUJob(50, true)
+	must.NoError(t, h.State.UpsertJob(structs.MsgTypeTestSetup, h.NextIndex(), nil, greedyJob))
+	greedyAlloc := createAllocWithDevice(uuid.Generate(), greedyJob, greedyJob.TaskGroups[0].Tasks[0].Resources,
+		&structs.AllocatedDeviceResource{Type: "gpu", Vendor: "nvidia", Name: "1080ti", DeviceIDs: []string{"dev0"}})
+	greedyAlloc.NodeID = node.ID
+	must.NoError(t, h.State.UpsertAllocs(structs.MsgTypeTestSetup, h.NextIndex(), []*structs.Allocation{greedyAlloc}))
+
+	// New non-greedy job at same priority — would be impossible under normal
+	// preemption (delta < 10), AND general preemption is disabled by default.
+	newJob := greedyGPUJob(50, false)
+	runJobEval(t, h, newJob)
+
+	must.Len(t, 1, h.Plans)
+	must.MapContainsKey(t, h.Plans[0].NodePreemptions, node.ID)
+	preempted := h.Plans[0].NodePreemptions[node.ID]
+	must.Len(t, 1, preempted)
+	must.Eq(t, greedyAlloc.ID, preempted[0].ID)
+	must.StrContains(t, preempted[0].DesiredDescription, "Greedy alloc evicted")
+}
+
+// TestPreemption_Greedy_DoesNotEvictNonGreedyAllocs verifies the third pass
+// is greedy-only — a non-greedy alloc holding the GPU is left alone and the
+// new job ends up blocked.
+func TestPreemption_Greedy_DoesNotEvictNonGreedyAllocs(t *testing.T) {
+	ci.Parallel(t)
+	h := NewHarness(t)
+
+	node := greedyGPUNode(t, 1)
+	must.NoError(t, h.State.UpsertNode(structs.MsgTypeTestSetup, h.NextIndex(), node))
+	enableGreedyPreemption(t, h, structs.PreemptionConfig{})
+
+	holder := greedyGPUJob(50, false) // no meta.greedy
+	must.NoError(t, h.State.UpsertJob(structs.MsgTypeTestSetup, h.NextIndex(), nil, holder))
+	holderAlloc := createAllocWithDevice(uuid.Generate(), holder, holder.TaskGroups[0].Tasks[0].Resources,
+		&structs.AllocatedDeviceResource{Type: "gpu", Vendor: "nvidia", Name: "1080ti", DeviceIDs: []string{"dev0"}})
+	holderAlloc.NodeID = node.ID
+	must.NoError(t, h.State.UpsertAllocs(structs.MsgTypeTestSetup, h.NextIndex(), []*structs.Allocation{holderAlloc}))
+
+	newJob := greedyGPUJob(50, false)
+	runJobEval(t, h, newJob)
+
+	// No preemption should have occurred.
+	if len(h.Plans) > 0 {
+		must.Eq(t, 0, len(h.Plans[0].NodePreemptions),
+			must.Sprintf("expected no preemption, got %+v", h.Plans[0].NodePreemptions))
+	}
+}
+
+// TestPreemption_Greedy_DoesNotEvictWhenIncomingJobIsGreedy guards against
+// greedy-evicts-greedy thrash.
+func TestPreemption_Greedy_DoesNotEvictWhenIncomingJobIsGreedy(t *testing.T) {
+	ci.Parallel(t)
+	h := NewHarness(t)
+
+	node := greedyGPUNode(t, 1)
+	must.NoError(t, h.State.UpsertNode(structs.MsgTypeTestSetup, h.NextIndex(), node))
+	enableGreedyPreemption(t, h, structs.PreemptionConfig{})
+
+	existing := greedyGPUJob(50, true)
+	must.NoError(t, h.State.UpsertJob(structs.MsgTypeTestSetup, h.NextIndex(), nil, existing))
+	existingAlloc := createAllocWithDevice(uuid.Generate(), existing, existing.TaskGroups[0].Tasks[0].Resources,
+		&structs.AllocatedDeviceResource{Type: "gpu", Vendor: "nvidia", Name: "1080ti", DeviceIDs: []string{"dev0"}})
+	existingAlloc.NodeID = node.ID
+	must.NoError(t, h.State.UpsertAllocs(structs.MsgTypeTestSetup, h.NextIndex(), []*structs.Allocation{existingAlloc}))
+
+	newJob := greedyGPUJob(50, true) // also greedy
+	runJobEval(t, h, newJob)
+
+	if len(h.Plans) > 0 {
+		must.Eq(t, 0, len(h.Plans[0].NodePreemptions),
+			must.Sprintf("greedy job must not evict another greedy alloc; got %+v", h.Plans[0].NodePreemptions))
+	}
+}
+
+// TestPreemption_Greedy_IgnoresPriorityDelta verifies the third pass bypasses
+// the priority-delta-of-10 rule — greedy is evictable even when the incoming
+// job has equal or lower priority.
+func TestPreemption_Greedy_IgnoresPriorityDelta(t *testing.T) {
+	ci.Parallel(t)
+	h := NewHarness(t)
+
+	node := greedyGPUNode(t, 1)
+	must.NoError(t, h.State.UpsertNode(structs.MsgTypeTestSetup, h.NextIndex(), node))
+	enableGreedyPreemption(t, h, structs.PreemptionConfig{})
+
+	// Greedy alloc at priority 50; incoming non-greedy at priority 1.
+	// Delta is -49, far inside the "skip" range — but greedy-only mode
+	// ignores it.
+	greedyJob := greedyGPUJob(50, true)
+	must.NoError(t, h.State.UpsertJob(structs.MsgTypeTestSetup, h.NextIndex(), nil, greedyJob))
+	greedyAlloc := createAllocWithDevice(uuid.Generate(), greedyJob, greedyJob.TaskGroups[0].Tasks[0].Resources,
+		&structs.AllocatedDeviceResource{Type: "gpu", Vendor: "nvidia", Name: "1080ti", DeviceIDs: []string{"dev0"}})
+	greedyAlloc.NodeID = node.ID
+	must.NoError(t, h.State.UpsertAllocs(structs.MsgTypeTestSetup, h.NextIndex(), []*structs.Allocation{greedyAlloc}))
+
+	newJob := greedyGPUJob(1, false)
+	runJobEval(t, h, newJob)
+
+	must.Len(t, 1, h.Plans)
+	must.MapContainsKey(t, h.Plans[0].NodePreemptions, node.ID)
+}
+
+// TestPreemption_Greedy_GeneralPreemptionTakesPrecedence verifies ordering of
+// passes: when general preemption is enabled AND there's a delta-eligible
+// non-greedy victim, the general pass wins before greedy mode is even tried.
+func TestPreemption_Greedy_GeneralPreemptionTakesPrecedence(t *testing.T) {
+	ci.Parallel(t)
+	h := NewHarness(t)
+
+	node := greedyGPUNode(t, 2)
+	must.NoError(t, h.State.UpsertNode(structs.MsgTypeTestSetup, h.NextIndex(), node))
+
+	enableGreedyPreemption(t, h, structs.PreemptionConfig{ServiceSchedulerEnabled: true})
+
+	// One greedy alloc at priority 50, one low-priority non-greedy alloc.
+	greedyJob := greedyGPUJob(50, true)
+	must.NoError(t, h.State.UpsertJob(structs.MsgTypeTestSetup, h.NextIndex(), nil, greedyJob))
+	greedyAlloc := createAllocWithDevice(uuid.Generate(), greedyJob, greedyJob.TaskGroups[0].Tasks[0].Resources,
+		&structs.AllocatedDeviceResource{Type: "gpu", Vendor: "nvidia", Name: "1080ti", DeviceIDs: []string{"dev0"}})
+	greedyAlloc.NodeID = node.ID
+
+	lowJob := greedyGPUJob(1, false)
+	must.NoError(t, h.State.UpsertJob(structs.MsgTypeTestSetup, h.NextIndex(), nil, lowJob))
+	lowAlloc := createAllocWithDevice(uuid.Generate(), lowJob, lowJob.TaskGroups[0].Tasks[0].Resources,
+		&structs.AllocatedDeviceResource{Type: "gpu", Vendor: "nvidia", Name: "1080ti", DeviceIDs: []string{"dev1"}})
+	lowAlloc.NodeID = node.ID
+
+	must.NoError(t, h.State.UpsertAllocs(structs.MsgTypeTestSetup, h.NextIndex(), []*structs.Allocation{greedyAlloc, lowAlloc}))
+
+	// New job at priority 50 — delta of 49 vs lowJob makes the non-greedy
+	// alloc preemptible via the general pass. Greedy alloc must be untouched.
+	newJob := greedyGPUJob(50, false)
+	runJobEval(t, h, newJob)
+
+	must.Len(t, 1, h.Plans)
+	preempted := h.Plans[0].NodePreemptions[node.ID]
+	must.Len(t, 1, preempted)
+	must.Eq(t, lowAlloc.ID, preempted[0].ID,
+		must.Sprintf("general preemption should evict the low-priority alloc, not the greedy one"))
+}
+
+// TestPreemption_Greedy_DisabledByConfig verifies that when
+// PreemptionConfig.GreedyPreemptionEnabled is false (default), the third pass
+// does not fire and a greedy alloc is left alone — even when no other
+// preemption mode is enabled.
+func TestPreemption_Greedy_DisabledByConfig(t *testing.T) {
+	ci.Parallel(t)
+	h := NewHarness(t)
+
+	node := greedyGPUNode(t, 1)
+	must.NoError(t, h.State.UpsertNode(structs.MsgTypeTestSetup, h.NextIndex(), node))
+	// Note: no enableGreedyPreemption — feature is OFF.
+
+	greedyJob := greedyGPUJob(50, true)
+	must.NoError(t, h.State.UpsertJob(structs.MsgTypeTestSetup, h.NextIndex(), nil, greedyJob))
+	greedyAlloc := createAllocWithDevice(uuid.Generate(), greedyJob, greedyJob.TaskGroups[0].Tasks[0].Resources,
+		&structs.AllocatedDeviceResource{Type: "gpu", Vendor: "nvidia", Name: "1080ti", DeviceIDs: []string{"dev0"}})
+	greedyAlloc.NodeID = node.ID
+	must.NoError(t, h.State.UpsertAllocs(structs.MsgTypeTestSetup, h.NextIndex(), []*structs.Allocation{greedyAlloc}))
+
+	newJob := greedyGPUJob(50, false)
+	runJobEval(t, h, newJob)
+
+	if len(h.Plans) > 0 {
+		must.Eq(t, 0, len(h.Plans[0].NodePreemptions),
+			must.Sprintf("greedy preemption is disabled by config, expected no preemption; got %+v", h.Plans[0].NodePreemptions))
+	}
+}
+
+// TestPreemption_Greedy_MultipleAllocsOnOneNode verifies multi-GPU eviction:
+// 4 greedy allocs on a 4-GPU node, incoming alloc needs 2 GPUs → evict 2.
+func TestPreemption_Greedy_MultipleAllocsOnOneNode(t *testing.T) {
+	ci.Parallel(t)
+	h := NewHarness(t)
+
+	node := greedyGPUNode(t, 4)
+	must.NoError(t, h.State.UpsertNode(structs.MsgTypeTestSetup, h.NextIndex(), node))
+	enableGreedyPreemption(t, h, structs.PreemptionConfig{})
+
+	greedyJob := greedyGPUJob(50, true)
+	greedyJob.TaskGroups[0].Count = 4
+	must.NoError(t, h.State.UpsertJob(structs.MsgTypeTestSetup, h.NextIndex(), nil, greedyJob))
+	var greedyAllocs []*structs.Allocation
+	for i := 0; i < 4; i++ {
+		a := createAllocWithDevice(uuid.Generate(), greedyJob, greedyJob.TaskGroups[0].Tasks[0].Resources,
+			&structs.AllocatedDeviceResource{Type: "gpu", Vendor: "nvidia", Name: "1080ti", DeviceIDs: []string{fmt.Sprintf("dev%d", i)}})
+		a.NodeID = node.ID
+		greedyAllocs = append(greedyAllocs, a)
+	}
+	must.NoError(t, h.State.UpsertAllocs(structs.MsgTypeTestSetup, h.NextIndex(), greedyAllocs))
+
+	// Incoming job wants 2 GPUs.
+	newJob := greedyGPUJob(50, false)
+	newJob.TaskGroups[0].Tasks[0].Resources.Devices[0].Count = 2
+	runJobEval(t, h, newJob)
+
+	must.Len(t, 1, h.Plans)
+	preempted := h.Plans[0].NodePreemptions[node.ID]
+	must.Eq(t, 2, len(preempted),
+		must.Sprintf("expected exactly 2 GPUs freed, got %d preemptions", len(preempted)))
+}

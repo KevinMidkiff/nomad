@@ -57,6 +57,7 @@ func TestOperatorSchedulerSetConfig_Run(t *testing.T) {
 		"-preempt-service-scheduler=true",
 		"-preempt-sysbatch-scheduler=true",
 		"-preempt-system-scheduler=false",
+		"-preempt-greedy=true",
 	}
 	must.Zero(t, c.Run(modifyingArgs))
 	s := ui.OutputWriter.String()
@@ -71,6 +72,7 @@ func TestOperatorSchedulerSetConfig_Run(t *testing.T) {
 			SysBatchSchedulerEnabled: true,
 			BatchSchedulerEnabled:    true,
 			ServiceSchedulerEnabled:  true,
+			GreedyPreemptionEnabled:  true,
 		},
 		MemoryOversubscriptionEnabled: true,
 		RejectJobRegistration:         true,

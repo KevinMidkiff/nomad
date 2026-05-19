@@ -59,6 +59,12 @@ capability.
   is enabled. Note that if this is set to true, then system jobs can preempt any
   other jobs. Must be one of `[true|false]`.
 
+- `-preempt-greedy` - Specifies whether greedy preemption is enabled. When
+  set to true, allocs whose job has `meta.greedy="true"` are preemptible by
+  any non-greedy alloc that needs their resources, regardless of priority
+  delta and independently of the other `-preempt-*-scheduler` flags. Only
+  fires for service and batch jobs. Must be one of `[true|false]`.
+
 ## Examples
 
 Modify the scheduler algorithm to spread:

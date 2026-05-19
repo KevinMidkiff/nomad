@@ -217,6 +217,135 @@ func TestPlanApply_applyPlan(t *testing.T) {
 	must.Eq(t, index, evalOut.ModifyIndex)
 }
 
+// applyGreedyPreemptionTestCase exercises applyPlan with a plan that preempts
+// one greedy job alloc and one non-greedy alloc, under a caller-supplied
+// PreemptionConfig. Returns the per-job count of EvalTriggerPreemption
+// follow-up evals after the plan is applied.
+func applyGreedyPreemptionTestCase(t *testing.T, cfg structs.PreemptionConfig) (greedyFollowups, normalFollowups int) {
+	t.Helper()
+
+	s1, cleanupS1 := TestServer(t, nil)
+	t.Cleanup(cleanupS1)
+	testutil.WaitForKeyring(t, s1.RPC, s1.Region())
+
+	must.NoError(t, s1.State().SchedulerSetConfig(800, &structs.SchedulerConfiguration{
+		PreemptionConfig: cfg,
+	}))
+
+	node := mock.Node()
+	testRegisterNode(t, s1, node)
+
+	greedyJob := mock.Job()
+	greedyJob.Meta = map[string]string{"greedy": "true"}
+	must.NoError(t, s1.State().UpsertJob(structs.MsgTypeTestSetup, 900, nil, greedyJob))
+	must.NoError(t, s1.State().UpsertJobSummary(901, mock.JobSummary(greedyJob.ID)))
+	greedyAlloc := mock.Alloc()
+	greedyAlloc.Job = greedyJob
+	greedyAlloc.JobID = greedyJob.ID
+	greedyAlloc.Namespace = greedyJob.Namespace
+	greedyAlloc.NodeID = node.ID
+
+	normalJob := mock.Job()
+	must.NoError(t, s1.State().UpsertJob(structs.MsgTypeTestSetup, 902, nil, normalJob))
+	must.NoError(t, s1.State().UpsertJobSummary(903, mock.JobSummary(normalJob.ID)))
+	normalAlloc := mock.Alloc()
+	normalAlloc.Job = normalJob
+	normalAlloc.JobID = normalJob.ID
+	normalAlloc.Namespace = normalJob.Namespace
+	normalAlloc.NodeID = node.ID
+
+	triggerAlloc := mock.Alloc()
+	triggerAlloc.NodeID = node.ID
+	must.NoError(t, s1.State().UpsertJobSummary(904, mock.JobSummary(triggerAlloc.JobID)))
+
+	greedyPreempted := &structs.Allocation{
+		ID:                    greedyAlloc.ID,
+		JobID:                 greedyAlloc.JobID,
+		Namespace:             greedyAlloc.Namespace,
+		NodeID:                greedyAlloc.NodeID,
+		DesiredStatus:         structs.AllocDesiredStatusEvict,
+		PreemptedByAllocation: triggerAlloc.ID,
+	}
+	normalPreempted := &structs.Allocation{
+		ID:                    normalAlloc.ID,
+		JobID:                 normalAlloc.JobID,
+		Namespace:             normalAlloc.Namespace,
+		NodeID:                normalAlloc.NodeID,
+		DesiredStatus:         structs.AllocDesiredStatusEvict,
+		PreemptedByAllocation: triggerAlloc.ID,
+	}
+
+	must.NoError(t, s1.State().UpsertAllocs(structs.MsgTypeTestSetup, 905,
+		[]*structs.Allocation{greedyAlloc, normalAlloc}))
+
+	eval := mock.Eval()
+	eval.JobID = triggerAlloc.JobID
+	must.NoError(t, s1.State().UpsertEvals(structs.MsgTypeTestSetup, 906, []*structs.Evaluation{eval}))
+
+	planRes := &structs.PlanResult{
+		NodeAllocation: map[string][]*structs.Allocation{
+			node.ID: {triggerAlloc},
+		},
+		NodePreemptions: map[string][]*structs.Allocation{
+			node.ID: {greedyPreempted, normalPreempted},
+		},
+	}
+
+	snap, err := s1.State().Snapshot()
+	must.NoError(t, err)
+
+	plan := &structs.Plan{Job: triggerAlloc.Job, EvalID: eval.ID}
+	future, err := s1.applyPlan(plan, planRes, snap)
+	must.NoError(t, err)
+	_, err = planWaitFuture(future)
+	must.NoError(t, err)
+
+	ws := memdb.NewWatchSet()
+	normalEvals, err := s1.fsm.State().EvalsByJob(ws, normalJob.Namespace, normalJob.ID)
+	must.NoError(t, err)
+	for _, e := range normalEvals {
+		if e.TriggeredBy == structs.EvalTriggerPreemption {
+			normalFollowups++
+		}
+	}
+	greedyEvals, err := s1.fsm.State().EvalsByJob(ws, greedyJob.Namespace, greedyJob.ID)
+	must.NoError(t, err)
+	for _, e := range greedyEvals {
+		if e.TriggeredBy == structs.EvalTriggerPreemption {
+			greedyFollowups++
+		}
+	}
+	return greedyFollowups, normalFollowups
+}
+
+// TestPlanApply_GreedyPreemption_EnabledSuppressesFollowupEval verifies that
+// when PreemptionConfig.GreedyPreemptionEnabled is true (and other
+// *SchedulerEnabled flags are NOT set), the follow-up EvalTriggerPreemption
+// eval is suppressed for greedy jobs but still emitted for non-greedy jobs.
+// This is the operational mode for the fal external scheduler.
+func TestPlanApply_GreedyPreemption_EnabledSuppressesFollowupEval(t *testing.T) {
+	ci.Parallel(t)
+	greedy, normal := applyGreedyPreemptionTestCase(t, structs.PreemptionConfig{
+		GreedyPreemptionEnabled: true,
+	})
+	must.Eq(t, 0, greedy,
+		must.Sprintf("greedy preempted job must NOT get follow-up eval when feature enabled; got %d", greedy))
+	must.Eq(t, 1, normal,
+		must.Sprintf("non-greedy preempted job must still get exactly one follow-up eval; got %d", normal))
+}
+
+// TestPlanApply_GreedyPreemption_DisabledByConfig_StillEmitsFollowup verifies
+// the gate works: without GreedyPreemptionEnabled, greedy jobs receive the
+// usual follow-up preemption eval, preserving historical behavior.
+func TestPlanApply_GreedyPreemption_DisabledByConfig_StillEmitsFollowup(t *testing.T) {
+	ci.Parallel(t)
+	greedy, normal := applyGreedyPreemptionTestCase(t, structs.PreemptionConfig{})
+	must.Eq(t, 1, greedy,
+		must.Sprintf("with feature disabled, greedy preempted job must get a follow-up eval; got %d", greedy))
+	must.Eq(t, 1, normal,
+		must.Sprintf("non-greedy preempted job must always get a follow-up eval; got %d", normal))
+}
+
 // Verifies that applyPlan properly updates the constituent objects in MemDB,
 // when the plan contains normalized allocs.
 func TestPlanApply_applyPlanWithNormalizedAllocs(t *testing.T) {

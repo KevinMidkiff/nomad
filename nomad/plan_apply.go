@@ -327,10 +327,25 @@ func (p *planner) applyPlan(plan *structs.Plan, result *structs.PlanResult, snap
 		}
 	}
 
+	// When greedy preemption is enabled, skip emitting the
+	// EvalTriggerPreemption follow-up eval for greedy jobs so an external
+	// scheduler can place the replacement alloc without racing Nomad.
+	//
+	// This is a narrow suppression: it only affects the eval emitted at
+	// preemption time. Other triggers (job-register, periodic, node-update,
+	// deployment watcher, blocked-eval reaper, drains) still produce evals
+	// for greedy jobs, so the external scheduler must reconcile any drift
+	// that arises from those paths on its own.
+	_, schedConfig, _ := p.srv.State().SchedulerConfig()
+	greedyEnabled := schedConfig != nil && schedConfig.PreemptionConfig.GreedyPreemptionEnabled
+
 	var evals []*structs.Evaluation
 	for preemptedJobID := range preemptedJobIDs {
 		job, _ := p.srv.State().JobByID(nil, preemptedJobID.Namespace, preemptedJobID.ID)
 		if job != nil {
+			if greedyEnabled && job.IsGreedy() {
+				continue
+			}
 			eval := &structs.Evaluation{
 				ID:          uuid.Generate(),
 				Namespace:   job.Namespace,

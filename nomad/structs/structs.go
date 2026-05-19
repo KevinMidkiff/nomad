@@ -12909,7 +12909,12 @@ func (p *Plan) AppendPreemptedAlloc(alloc *Allocation, preemptingAllocID string)
 	newAlloc.DesiredStatus = AllocDesiredStatusEvict
 	newAlloc.PreemptedByAllocation = preemptingAllocID
 
-	desiredDesc := fmt.Sprintf("Preempted by alloc ID %v", preemptingAllocID)
+	var desiredDesc string
+	if alloc.IsGreedy() {
+		desiredDesc = fmt.Sprintf("Greedy alloc evicted for alloc ID %v", preemptingAllocID)
+	} else {
+		desiredDesc = fmt.Sprintf("Preempted by alloc ID %v", preemptingAllocID)
+	}
 	newAlloc.DesiredDescription = desiredDesc
 
 	// TaskResources are needed by the plan applier to check if allocations fit

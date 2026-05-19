@@ -359,7 +359,8 @@
             {
               "batch_scheduler_enabled": true,
               "system_scheduler_enabled": true,
-              "service_scheduler_enabled": true
+              "service_scheduler_enabled": true,
+              "greedy_preemption_enabled": true
             }
           ]
         }
