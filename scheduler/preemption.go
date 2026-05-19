@@ -184,6 +184,23 @@ func (p *Preemptor) SetNode(node *structs.Node) {
 	p.nodeRemainingResources = nodeRemainingResources
 }
 
+// SubtractFromNodeRemaining adjusts the cached remaining node capacity by
+// subtracting the resources held by the given allocs. Used by zero-cost
+// greedy masking when greedy allocs that survive the masking-derivation
+// step (i.e., aren't being evicted) still consume node capacity but are
+// not in the preemption candidate set.
+func (p *Preemptor) SubtractFromNodeRemaining(allocs []*structs.Allocation) {
+	for _, a := range allocs {
+		if a == nil || a.AllocatedResources == nil {
+			continue
+		}
+		if a.ClientTerminalStatus() {
+			continue
+		}
+		p.nodeRemainingResources.Subtract(a.AllocatedResources.Comparable())
+	}
+}
+
 // SetCandidates initializes the candidate set from which preemptions are chosen
 func (p *Preemptor) SetCandidates(allocs []*structs.Allocation) {
 	// Reset candidate set
@@ -351,6 +368,15 @@ func (p *Preemptor) PreemptForNetwork(networkResourceAsk *structs.NetworkResourc
 
 		// Filter out alloc that's ineligible: priority delta in normal mode,
 		// non-greedy in greedy-only mode.
+		//
+		// Note: under zero-cost greedy masking (the default for the
+		// non-greedy placement path) greedy allocs are masked from
+		// NetworkIndex before AssignPorts is called, so the bin-packer
+		// never reaches this preemption path on a greedy port conflict.
+		// The greedyOnly branch below is reachable only if a caller
+		// constructs a Preemptor with SetGreedyOnly(true) outside the
+		// masking path (e.g., the greedy-shortfall fallback in rank.go,
+		// which currently only goes through PreemptForTaskGroup).
 		var ineligible bool
 		if p.greedyOnly {
 			ineligible = !alloc.IsGreedy()
@@ -566,7 +592,14 @@ func (p *Preemptor) PreemptForDevice(ask *structs.RequestedDevice, devAlloc *dev
 	// Examine matching allocs by device
 OUTER:
 	for deviceIDTuple, allocsGrp := range deviceToAllocs {
-		// First group and sort allocations using this device by priority
+		// First group and sort allocations using this device by priority.
+		//
+		// Note: under zero-cost greedy masking (rank.go: BinPackIterator)
+		// greedy device instances are masked from deviceAllocator before
+		// createOffer runs, so PreemptForDevice is not invoked on the
+		// greedy path. The greedyOnly branch of filterAndGroupPreemptibleAllocs
+		// is dead under the current scheduler wiring but is preserved so a
+		// future caller (e.g., a v1-style third-pass fallback) can use it.
 		allocsByPriority := filterAndGroupPreemptibleAllocs(p.jobPriority, allocsGrp.allocs, p.greedyOnly)
 
 		// Reset preempted count for this device
