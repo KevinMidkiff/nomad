@@ -437,16 +437,21 @@ server {
 }
 ```
 
-`greedy_preemption_enabled` is an additional preemption mode that runs
+`greedy_preemption_enabled` is a zero-cost preemption mode that runs
 independently of the per-scheduler flags above. When enabled, allocations
-whose job has `meta.greedy = "true"` may be evicted by any non-greedy
-service- or batch-type allocation that needs their resources, regardless
-of the usual priority-delta-of-10 rule. It is intended for clusters that
-run a co-resident external scheduler responsible for placing the greedy
-workload; the auto follow-up eval normally emitted on preemption is
-suppressed for greedy jobs so Nomad does not race the external scheduler
-to replace the evicted alloc. The pass only fires for the service and
-batch schedulers; system and sysbatch jobs are unaffected.
+whose job has `meta.greedy = "true"` are masked from bin-pack resource
+accounting for non-greedy service- and batch-type placements: the
+scheduler picks the best-fit node as if greedy allocs weren't there and
+then evicts only the specific greedy allocs whose device IDs, ports, or
+reserved cores the new alloc actually claimed. Non-conflicting greedy
+allocs are left running, and greedy presence has no impact on placement
+scoring. Eviction bypasses the usual priority-delta-of-10 rule. It is
+intended for clusters that run a co-resident external scheduler
+responsible for placing the greedy workload; the auto follow-up eval
+normally emitted on preemption is suppressed for greedy jobs so Nomad
+does not race the external scheduler to replace the evicted alloc.
+Greedy masking only applies to the service and batch schedulers; system
+and sysbatch jobs are unaffected.
 
 ## Client Heartbeats ((#client-heartbeats))
 

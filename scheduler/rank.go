@@ -809,6 +809,21 @@ NEXTNODE:
 			// adding kept-greedy + the new alloc would exceed the limit,
 			// evict additional greedy (lowest priority first) so the
 			// validating AllocsFit doesn't reject the node for count alone.
+			//
+			// Ordering note: this runs eagerly, BEFORE the greedy-shortfall
+			// and non-greedy fallback steps. That's deliberate. Greedy
+			// allocs are zero-cost to evict (no follow-up eval, no
+			// reschedule), so the design preference is to free count budget
+			// from greedy first rather than wait for a later fallback. In
+			// the primary supported configuration (greedy preemption only,
+			// iter.evict=false), this is unambiguously correct: any failure
+			// after this point hits the `continue` path below and discards
+			// the local allocsToPreempt before it reaches option.PreemptedAllocs,
+			// so no greedy is wastefully evicted on a placement that fails.
+			// In the dual-mode case (general preemption *and* greedy masking
+			// both enabled), this ordering can pick a greedy victim that the
+			// later non-greedy fallback would have made unnecessary; greedy
+			// is still cheaper to evict, so we accept that trade.
 			if option.Node.NodeMaxAllocs > 0 {
 				var extra []*structs.Allocation
 				keptGreedy, extra = enforceNodeMaxAllocs(option.Node, proposed, keptGreedy, 1)
