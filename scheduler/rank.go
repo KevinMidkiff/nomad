@@ -255,6 +255,21 @@ NEXTNODE:
 			continue
 		}
 
+		// Zero-cost greedy masking: when evictGreedyOnly is set, hide greedy
+		// allocs from bin-pack accounting (NetworkIndex, deviceAllocator,
+		// consumedCores walks, the final AllocsFit). Greedy allocs become
+		// candidates for eviction only on the specific resources the new
+		// alloc actually claims. Feasibility iterators upstream (host_volume,
+		// distinct_hosts, distinct_property) still see greedy allocs.
+		var greedyOnNode []*structs.Allocation
+		var maskingActive bool
+		if iter.evictGreedyOnly {
+			var nonGreedy []*structs.Allocation
+			nonGreedy, greedyOnNode = splitGreedy(proposed)
+			proposed = nonGreedy
+			maskingActive = len(greedyOnNode) > 0
+		}
+
 		// Index the existing network usage.
 		// This should never collide, since it represents the current state of
 		// the node. If it does collide though, it means we found a bug! So
@@ -308,7 +323,12 @@ NEXTNODE:
 		// Initialize preemptor with node
 		preemptor := NewPreemptor(iter.priority, iter.ctx, &iter.jobId)
 		preemptor.SetNode(option.Node)
-		preemptor.SetGreedyOnly(iter.evictGreedyOnly)
+		// Under zero-cost greedy masking, greedy eviction is handled by the
+		// derivation step after the task loop (selectGreedyVictims for
+		// device/port/core claims; a separate greedy-only Preemptor for
+		// shared CPU/RAM/disk shortfall). The main preemptor handles only
+		// non-greedy preemption, so it always runs with greedyOnly=false.
+		preemptor.SetGreedyOnly(false)
 
 		// Count the number of existing preemptions
 		allPreemptions := iter.ctx.Plan().NodePreemptions
@@ -345,8 +365,12 @@ NEXTNODE:
 			}
 			offer, err := netIdx.AssignPorts(ask)
 			if err != nil {
-				// If eviction is not enabled (general or greedy-only), mark this node as exhausted and continue
-				if !iter.evict && !iter.evictGreedyOnly {
+				// Under zero-cost greedy masking, the netIdx already excludes
+				// greedy ports, so AssignPorts succeeds without entering this
+				// block when only greedy holds the contended port. This block
+				// only runs when general preemption (iter.evict) is enabled
+				// and a non-greedy victim must be chosen.
+				if !iter.evict {
 					iter.ctx.Metrics().ExhaustedNode(option.Node,
 						fmt.Sprintf("network: %s", err))
 					netIdx.Release()
@@ -421,8 +445,11 @@ NEXTNODE:
 				ask := task.Resources.Networks[0].Copy()
 				offer, err := netIdx.AssignTaskNetwork(ask)
 				if offer == nil {
-					// If eviction is not enabled (general or greedy-only), mark this node as exhausted and continue
-					if !iter.evict && !iter.evictGreedyOnly {
+					// Under zero-cost greedy masking, the netIdx excludes
+					// greedy ports — so AssignTaskNetwork only fails here
+					// when non-greedy holds the contended port. This block
+					// runs only when general preemption (iter.evict) is on.
+					if !iter.evict {
 						iter.ctx.Metrics().ExhaustedNode(option.Node,
 							fmt.Sprintf("network: %s", err))
 						netIdx.Release()
@@ -586,8 +613,12 @@ NEXTNODE:
 				// and devices WITH leveraging preemption. We will have already
 				// made attempts without preemption.
 
-				// If preemption (general or greedy-only) is not enabled, this node is exhausted.
-				if !iter.evict && !iter.evictGreedyOnly {
+				// Under zero-cost greedy masking, devAllocator excludes
+				// greedy device instances — so createOffer succeeds without
+				// entering this block when only greedy holds the contended
+				// device. This block runs only when general preemption
+				// (iter.evict) is on and a non-greedy victim must be chosen.
+				if !iter.evict {
 					// surface err from createOffer()
 					iter.ctx.Metrics().ExhaustedNode(option.Node, fmt.Sprintf("devices: %s", err))
 					continue NEXTNODE
@@ -760,26 +791,141 @@ NEXTNODE:
 			total.TaskLifecycles[task.Name] = task.Lifecycle
 		}
 
-		// Store current set of running allocs before adding resources for the task group
+		// Zero-cost greedy: derive greedy victims from the device IDs, ports,
+		// and reserved cores the new alloc actually claimed. Greedy allocs
+		// with no overlap survive; the surviving ones are added back to the
+		// fit check so the validation matches what plan_apply.go will see.
+		var keptGreedy []*structs.Allocation
+		if maskingActive {
+			claimed := buildClaimedResources(total)
+			victims := selectGreedyVictims(greedyOnNode, claimed)
+			if len(victims) > 0 {
+				allocsToPreempt = append(allocsToPreempt, victims...)
+			}
+			keptGreedy = structs.RemoveAllocs(greedyOnNode, victims)
+
+			// Honor NodeMaxAllocs: AllocsFit's count check fires before
+			// resource accounting and counts every alloc in the slice. If
+			// adding kept-greedy + the new alloc would exceed the limit,
+			// evict additional greedy (lowest priority first) so the
+			// validating AllocsFit doesn't reject the node for count alone.
+			//
+			// Ordering note: this runs eagerly, BEFORE the greedy-shortfall
+			// and non-greedy fallback steps. That's deliberate. Greedy
+			// allocs are zero-cost to evict (no follow-up eval, no
+			// reschedule), so the design preference is to free count budget
+			// from greedy first rather than wait for a later fallback. In
+			// the primary supported configuration (greedy preemption only,
+			// iter.evict=false), this is unambiguously correct: any failure
+			// after this point hits the `continue` path below and discards
+			// the local allocsToPreempt before it reaches option.PreemptedAllocs,
+			// so no greedy is wastefully evicted on a placement that fails.
+			// In the dual-mode case (general preemption *and* greedy masking
+			// both enabled), this ordering can pick a greedy victim that the
+			// later non-greedy fallback would have made unnecessary; greedy
+			// is still cheaper to evict, so we accept that trade.
+			if option.Node.NodeMaxAllocs > 0 {
+				var extra []*structs.Allocation
+				keptGreedy, extra = enforceNodeMaxAllocs(option.Node, proposed, keptGreedy, 1)
+				if len(extra) > 0 {
+					allocsToPreempt = append(allocsToPreempt, extra...)
+				}
+			}
+		}
+
+		// Store current set of running allocs before adding resources for the
+		// task group. In masking mode this is the non-greedy set; the
+		// trailing non-greedy preemption fallback runs against it, which
+		// preserves the "greedy is invisible to general preemption"
+		// invariant.
 		current := proposed
 
 		// Add the resources we are trying to fit
 		proposed = append(proposed, &structs.Allocation{AllocatedResources: total})
 
-		// Check if these allocations fit, if they do not, simply skip this node
-		fit, dim, util, _ := structs.AllocsFit(option.Node, proposed, netIdx, false)
-		netIdx.Release()
+		// Compute fit and the util used for scoring.
+		//
+		// In masking mode we deliberately split these:
+		//   - scoringUtil is computed from the *masked* set
+		//     (nonGreedy + new alloc). Kept-greedy resources are invisible
+		//     to scoring — the "zero-cost" invariant.
+		//   - the fit/dim that drives downstream eviction logic is computed
+		//     against the *full* set (nonGreedy + keptGreedy + new alloc) so
+		//     the result matches what plan_apply.go will validate.
+		// In non-masking mode the two are the same single call.
+		var (
+			fit       bool
+			dim       string
+			util      *structs.ComparableResources
+		)
+		if maskingActive {
+			// Masked-picture fit and util (scoring).
+			fitMasked, dimMasked, utilMasked, _ := structs.AllocsFit(option.Node, proposed, netIdx, false)
+			netIdx.Release()
+			netIdx = nil
+			util = utilMasked
+			if !fitMasked {
+				// The masked picture itself doesn't fit (nonGreedy alone +
+				// new alloc exceeds the node). Greedy eviction cannot help
+				// — only the non-greedy fallback can.
+				fit, dim = fitMasked, dimMasked
+			} else {
+				// Validate against the full set including kept-greedy.
+				fullProposed := make([]*structs.Allocation, 0, len(proposed)+len(keptGreedy))
+				fullProposed = append(fullProposed, proposed...)
+				fullProposed = append(fullProposed, keptGreedy...)
+				fit, dim, _, _ = structs.AllocsFit(option.Node, fullProposed, nil, false)
+			}
+		} else {
+			fit, dim, util, _ = structs.AllocsFit(option.Node, proposed, netIdx, false)
+			netIdx.Release()
+		}
 		if !fit {
-			// Skip the node if evictions are not enabled (general or greedy-only)
-			if !iter.evict && !iter.evictGreedyOnly {
+			// Under masking, try covering the residual shortfall by evicting
+			// more greedy allocs (free) before falling through to non-greedy
+			// preemption (which incurs a follow-up eval per victim job).
+			if maskingActive && len(keptGreedy) > 0 {
+				greedyShort := NewPreemptor(iter.priority, iter.ctx, &iter.jobId)
+				greedyShort.SetNode(option.Node)
+				greedyShort.SetGreedyOnly(true)
+				greedyShort.SetPreemptions(currentPreemptions)
+				// Include non-greedy in the candidate set so the
+				// PreemptForTaskGroup node-remaining math accounts for the
+				// node's full occupancy; the greedyOnly filter ensures only
+				// greedy allocs are picked for eviction.
+				combined := make([]*structs.Allocation, 0, len(current)+len(keptGreedy))
+				combined = append(combined, current...)
+				combined = append(combined, keptGreedy...)
+				greedyShort.SetCandidates(combined)
+				extra := greedyShort.PreemptForTaskGroup(total)
+				if len(extra) > 0 {
+					allocsToPreempt = append(allocsToPreempt, extra...)
+					keptGreedy = structs.RemoveAllocs(keptGreedy, extra)
+					// Re-validate against the full set. We deliberately
+					// discard the recheck's util — scoring still uses the
+					// masked util computed above (greedy is invisible to
+					// scoring, including any greedy we evicted here).
+					recheck := make([]*structs.Allocation, 0, len(current)+len(keptGreedy)+1)
+					recheck = append(recheck, current...)
+					recheck = append(recheck, keptGreedy...)
+					recheck = append(recheck, &structs.Allocation{AllocatedResources: total})
+					fit, dim, _, _ = structs.AllocsFit(option.Node, recheck, nil, false)
+				}
+			}
+		}
+		if !fit {
+			// Skip the node if general preemption is not enabled.
+			if !iter.evict {
 				iter.ctx.Metrics().ExhaustedNode(option.Node, dim)
 				continue
 			}
 
-			// If eviction is enabled and the node doesn't fit the alloc, check if
-			// any allocs can be preempted
-
-			// Initialize preemptor with candidate set
+			// Non-greedy fallback. Account for surviving greedy in the
+			// node-remaining math (they're not candidates but still occupy
+			// the node) so we don't under-evict non-greedy.
+			if maskingActive && len(keptGreedy) > 0 {
+				preemptor.SubtractFromNodeRemaining(keptGreedy)
+			}
 			preemptor.SetCandidates(current)
 
 			preemptedAllocs := preemptor.PreemptForTaskGroup(total)

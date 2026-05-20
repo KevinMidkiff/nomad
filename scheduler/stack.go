@@ -174,6 +174,12 @@ func (s *GenericStack) Select(tg *structs.TaskGroup, options *SelectOptions) *Ra
 	s.binPack.SetTaskGroup(tg)
 	if options != nil {
 		s.binPack.evict = options.Preempt
+		// PreemptGreedy enables zero-cost greedy masking inside
+		// BinPackIterator.Next: greedy allocs are hidden from resource
+		// accounting (NetworkIndex, deviceAllocator, AllocsFit) and only
+		// the specific greedy allocs holding resources the new alloc
+		// claims are evicted. Runs alongside the no-preemption pass and
+		// the general-preemption pass (when enabled).
 		s.binPack.evictGreedyOnly = options.PreemptGreedy
 	}
 	s.jobAntiAff.SetTaskGroup(tg)
@@ -234,6 +240,13 @@ type SystemStack struct {
 //
 // sysbatch is used to determine which scheduler config option is used to
 // control the use of preemption.
+//
+// Note: zero-cost greedy masking (PreemptionConfig.GreedyPreemptionEnabled)
+// is intentionally NOT applied to system or sysbatch jobs. System jobs are
+// placed one-per-node by design — greedy + system is incoherent (a "best
+// effort" job with system semantics has no meaning). The system stack's
+// binPack iterator is constructed with evictGreedyOnly = false and never
+// reads SelectOptions.PreemptGreedy.
 func NewSystemStack(sysbatch bool, ctx Context) *SystemStack {
 	// Create a new stack
 	s := &SystemStack{ctx: ctx}

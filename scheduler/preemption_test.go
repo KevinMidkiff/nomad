@@ -1740,10 +1740,17 @@ func TestPreemption_Greedy_IgnoresPriorityDelta(t *testing.T) {
 	must.MapContainsKey(t, h.Plans[0].NodePreemptions, node.ID)
 }
 
-// TestPreemption_Greedy_GeneralPreemptionTakesPrecedence verifies ordering of
-// passes: when general preemption is enabled AND there's a delta-eligible
-// non-greedy victim, the general pass wins before greedy mode is even tried.
-func TestPreemption_Greedy_GeneralPreemptionTakesPrecedence(t *testing.T) {
+// TestPreemption_Greedy_PreferredOverGeneralWhenBothApply verifies that
+// under zero-cost greedy masking, when both general preemption and greedy
+// masking are enabled and either could satisfy the new alloc, the greedy
+// alloc is evicted in preference to the low-priority non-greedy alloc:
+// greedy eviction is free (no follow-up eval, no reschedule), so it should
+// always win over a non-greedy preemption that would incur a follow-up eval.
+//
+// The masking step in BinPackIterator.Next derives greedy victims from the
+// device IDs the new alloc actually claims, *before* the trailing fallback
+// runs PreemptForTaskGroup against non-greedy candidates.
+func TestPreemption_Greedy_PreferredOverGeneralWhenBothApply(t *testing.T) {
 	ci.Parallel(t)
 	h := NewHarness(t)
 
@@ -1752,7 +1759,8 @@ func TestPreemption_Greedy_GeneralPreemptionTakesPrecedence(t *testing.T) {
 
 	enableGreedyPreemption(t, h, structs.PreemptionConfig{ServiceSchedulerEnabled: true})
 
-	// One greedy alloc at priority 50, one low-priority non-greedy alloc.
+	// One greedy alloc at priority 50 holding dev0, one low-priority
+	// non-greedy alloc holding dev1.
 	greedyJob := greedyGPUJob(50, true)
 	must.NoError(t, h.State.UpsertJob(structs.MsgTypeTestSetup, h.NextIndex(), nil, greedyJob))
 	greedyAlloc := createAllocWithDevice(uuid.Generate(), greedyJob, greedyJob.TaskGroups[0].Tasks[0].Resources,
@@ -1767,16 +1775,17 @@ func TestPreemption_Greedy_GeneralPreemptionTakesPrecedence(t *testing.T) {
 
 	must.NoError(t, h.State.UpsertAllocs(structs.MsgTypeTestSetup, h.NextIndex(), []*structs.Allocation{greedyAlloc, lowAlloc}))
 
-	// New job at priority 50 — delta of 49 vs lowJob makes the non-greedy
-	// alloc preemptible via the general pass. Greedy alloc must be untouched.
+	// New non-greedy job at priority 50. Either dev0 (via greedy eviction)
+	// or dev1 (via general preemption of lowJob) would satisfy the GPU.
+	// Greedy must win — it's free; the low-priority alloc must survive.
 	newJob := greedyGPUJob(50, false)
 	runJobEval(t, h, newJob)
 
 	must.Len(t, 1, h.Plans)
 	preempted := h.Plans[0].NodePreemptions[node.ID]
 	must.Len(t, 1, preempted)
-	must.Eq(t, lowAlloc.ID, preempted[0].ID,
-		must.Sprintf("general preemption should evict the low-priority alloc, not the greedy one"))
+	must.Eq(t, greedyAlloc.ID, preempted[0].ID,
+		must.Sprintf("zero-cost greedy must be preferred over low-priority non-greedy preemption"))
 }
 
 // TestPreemption_Greedy_DisabledByConfig verifies that when
@@ -1808,7 +1817,9 @@ func TestPreemption_Greedy_DisabledByConfig(t *testing.T) {
 }
 
 // TestPreemption_Greedy_MultipleAllocsOnOneNode verifies multi-GPU eviction:
-// 4 greedy allocs on a 4-GPU node, incoming alloc needs 2 GPUs → evict 2.
+// 4 greedy allocs on a 4-GPU node, incoming alloc needs 2 GPUs → evict
+// exactly 2, and the 2 evicted greedy allocs must be the ones holding the
+// device instances the new alloc actually got assigned (not just "any 2").
 func TestPreemption_Greedy_MultipleAllocsOnOneNode(t *testing.T) {
 	ci.Parallel(t)
 	h := NewHarness(t)
@@ -1820,12 +1831,15 @@ func TestPreemption_Greedy_MultipleAllocsOnOneNode(t *testing.T) {
 	greedyJob := greedyGPUJob(50, true)
 	greedyJob.TaskGroups[0].Count = 4
 	must.NoError(t, h.State.UpsertJob(structs.MsgTypeTestSetup, h.NextIndex(), nil, greedyJob))
+	allocByDeviceID := map[string]*structs.Allocation{}
 	var greedyAllocs []*structs.Allocation
 	for i := 0; i < 4; i++ {
+		devID := fmt.Sprintf("dev%d", i)
 		a := createAllocWithDevice(uuid.Generate(), greedyJob, greedyJob.TaskGroups[0].Tasks[0].Resources,
-			&structs.AllocatedDeviceResource{Type: "gpu", Vendor: "nvidia", Name: "1080ti", DeviceIDs: []string{fmt.Sprintf("dev%d", i)}})
+			&structs.AllocatedDeviceResource{Type: "gpu", Vendor: "nvidia", Name: "1080ti", DeviceIDs: []string{devID}})
 		a.NodeID = node.ID
 		greedyAllocs = append(greedyAllocs, a)
+		allocByDeviceID[devID] = a
 	}
 	must.NoError(t, h.State.UpsertAllocs(structs.MsgTypeTestSetup, h.NextIndex(), greedyAllocs))
 
@@ -1836,6 +1850,552 @@ func TestPreemption_Greedy_MultipleAllocsOnOneNode(t *testing.T) {
 
 	must.Len(t, 1, h.Plans)
 	preempted := h.Plans[0].NodePreemptions[node.ID]
-	must.Eq(t, 2, len(preempted),
+	must.Len(t, 2, preempted,
 		must.Sprintf("expected exactly 2 GPUs freed, got %d preemptions", len(preempted)))
+
+	// The 2 evicted allocs must be exactly the holders of the 2 device IDs
+	// the new alloc claimed.
+	placed := h.Plans[0].NodeAllocation[node.ID]
+	must.Len(t, 1, placed)
+	var claimedDeviceIDs []string
+	for _, tr := range placed[0].AllocatedResources.Tasks {
+		for _, dev := range tr.Devices {
+			claimedDeviceIDs = append(claimedDeviceIDs, dev.DeviceIDs...)
+		}
+	}
+	must.Len(t, 2, claimedDeviceIDs)
+
+	expectedVictims := map[string]struct{}{}
+	for _, did := range claimedDeviceIDs {
+		victim, ok := allocByDeviceID[did]
+		must.True(t, ok, must.Sprintf("claimed device %s has no greedy holder", did))
+		expectedVictims[victim.ID] = struct{}{}
+	}
+	actualVictims := map[string]struct{}{}
+	for _, a := range preempted {
+		actualVictims[a.ID] = struct{}{}
+	}
+	must.Eq(t, expectedVictims, actualVictims,
+		must.Sprintf("evicted allocs must be the holders of the claimed device IDs"))
+}
+
+// TestPreemption_Greedy_PrefersGreedyNodeAsBestFit verifies the core zero-cost
+// premise: greedy presence on a node does not push placement to a worse-fit
+// alternative. With binpack scoring, a node with heavier non-greedy
+// utilization (post-placement) scores higher; the greedy-occupied node
+// should win on score and evict its greedy alloc instead of placing on an
+// empty alternative that fits without preemption.
+//
+// Without zero-cost masking (v1 fallback), the empty node A would have won
+// because it satisfied the request without any preemption.
+func TestPreemption_Greedy_PrefersGreedyNodeAsBestFit(t *testing.T) {
+	ci.Parallel(t)
+	h := NewHarness(t)
+
+	nodeA := greedyGPUNode(t, 1)
+	nodeB := greedyGPUNode(t, 1)
+	must.NoError(t, h.State.UpsertNode(structs.MsgTypeTestSetup, h.NextIndex(), nodeA))
+	must.NoError(t, h.State.UpsertNode(structs.MsgTypeTestSetup, h.NextIndex(), nodeB))
+	enableGreedyPreemption(t, h, structs.PreemptionConfig{})
+
+	// Heavy non-greedy CPU consumer on B drives B's post-placement
+	// utilization up. This non-greedy is NOT a preemption candidate (same
+	// priority as the new job, no general preemption configured).
+	cpuHogJob := nonGPUJob(50, false, 3000, 1024)
+	must.NoError(t, h.State.UpsertJob(structs.MsgTypeTestSetup, h.NextIndex(), nil, cpuHogJob))
+	cpuHogAlloc := createAlloc(uuid.Generate(), cpuHogJob, cpuHogJob.TaskGroups[0].Tasks[0].Resources)
+	cpuHogAlloc.NodeID = nodeB.ID
+
+	// Greedy alloc holding B's GPU. Under masking this is invisible to
+	// device accounting on B.
+	greedyJob := greedyGPUJob(50, true)
+	must.NoError(t, h.State.UpsertJob(structs.MsgTypeTestSetup, h.NextIndex(), nil, greedyJob))
+	greedyAlloc := createAllocWithDevice(uuid.Generate(), greedyJob, greedyJob.TaskGroups[0].Tasks[0].Resources,
+		&structs.AllocatedDeviceResource{Type: "gpu", Vendor: "nvidia", Name: "1080ti", DeviceIDs: []string{"dev0"}})
+	greedyAlloc.NodeID = nodeB.ID
+
+	must.NoError(t, h.State.UpsertAllocs(structs.MsgTypeTestSetup, h.NextIndex(), []*structs.Allocation{cpuHogAlloc, greedyAlloc}))
+
+	newJob := greedyGPUJob(50, false)
+	runJobEval(t, h, newJob)
+
+	must.Len(t, 1, h.Plans)
+	plan := h.Plans[0]
+	must.MapContainsKey(t, plan.NodeAllocation, nodeB.ID,
+		must.Sprintf("expected placement on node B (better binpack fit), but plan landed on %v",
+			mapKeys(plan.NodeAllocation)))
+	preempted := plan.NodePreemptions[nodeB.ID]
+	must.Len(t, 1, preempted)
+	must.Eq(t, greedyAlloc.ID, preempted[0].ID)
+
+	// Plan-applier validation: kept-non-greedy + new alloc must fit on B.
+	mustPlanApplierFit(t, nodeB, plan, []*structs.Allocation{cpuHogAlloc, greedyAlloc})
+}
+
+// TestPreemption_Greedy_DoesNotEvictNonConflictingGreedy verifies that
+// greedy allocs whose resources the new alloc does not claim are left
+// intact. The node has two greedy allocs: A holds the only GPU; B is
+// CPU-only and holds no device. A new GPU-requesting alloc must evict A
+// (whose GPU it claims) but leave B running — B's resources do not overlap
+// any claim, even though B is greedy.
+//
+// Note: we cannot reliably test "free GPU available, greedy GPU untouched"
+// because the masked device allocator considers all instances free and
+// may pick any of them — under zero-cost, that's by design (the greedy
+// holder of whichever device gets picked is then evicted at zero cost).
+func TestPreemption_Greedy_DoesNotEvictNonConflictingGreedy(t *testing.T) {
+	ci.Parallel(t)
+	h := NewHarness(t)
+
+	node := greedyGPUNode(t, 1)
+	must.NoError(t, h.State.UpsertNode(structs.MsgTypeTestSetup, h.NextIndex(), node))
+	enableGreedyPreemption(t, h, structs.PreemptionConfig{})
+
+	gpuJob := greedyGPUJob(50, true)
+	must.NoError(t, h.State.UpsertJob(structs.MsgTypeTestSetup, h.NextIndex(), nil, gpuJob))
+	gpuGreedy := createAllocWithDevice(uuid.Generate(), gpuJob, gpuJob.TaskGroups[0].Tasks[0].Resources,
+		&structs.AllocatedDeviceResource{Type: "gpu", Vendor: "nvidia", Name: "1080ti", DeviceIDs: []string{"dev0"}})
+	gpuGreedy.NodeID = node.ID
+
+	// Second greedy alloc has no device and consumes a small slice of CPU/RAM.
+	// The new alloc claims neither this alloc's CPU shares (they're not
+	// reserved cores) nor any port — so cpuGreedy must survive.
+	cpuJob := nonGPUJob(50, true, 500, 256)
+	must.NoError(t, h.State.UpsertJob(structs.MsgTypeTestSetup, h.NextIndex(), nil, cpuJob))
+	cpuGreedy := createAlloc(uuid.Generate(), cpuJob, cpuJob.TaskGroups[0].Tasks[0].Resources)
+	cpuGreedy.NodeID = node.ID
+
+	must.NoError(t, h.State.UpsertAllocs(structs.MsgTypeTestSetup, h.NextIndex(), []*structs.Allocation{gpuGreedy, cpuGreedy}))
+
+	newJob := greedyGPUJob(50, false)
+	runJobEval(t, h, newJob)
+
+	must.Len(t, 1, h.Plans)
+	plan := h.Plans[0]
+	preempted := plan.NodePreemptions[node.ID]
+	must.Len(t, 1, preempted, must.Sprintf("expected exactly one greedy eviction (the GPU holder)"))
+	must.Eq(t, gpuGreedy.ID, preempted[0].ID,
+		must.Sprintf("expected the GPU-holding greedy alloc evicted; the CPU-only greedy must survive"))
+
+	mustPlanApplierFit(t, node, plan, []*structs.Allocation{gpuGreedy, cpuGreedy})
+}
+
+// TestPreemption_Greedy_SharedCPUResourceShortfall verifies the
+// greedy-shortfall step: when claimed devices/ports/cores don't cover the
+// shortfall but the new alloc still doesn't fit on the masked node,
+// PreemptForTaskGroup runs against a greedy-only candidate set and evicts
+// the smallest covering set of greedy allocs.
+func TestPreemption_Greedy_SharedCPUResourceShortfall(t *testing.T) {
+	ci.Parallel(t)
+	h := NewHarness(t)
+
+	node := greedyGPUNode(t, 0)
+	must.NoError(t, h.State.UpsertNode(structs.MsgTypeTestSetup, h.NextIndex(), node))
+	enableGreedyPreemption(t, h, structs.PreemptionConfig{})
+
+	// 3 greedy allocs, each consuming 1000 CPU. Node total = 4000.
+	greedyJob := nonGPUJob(50, true, 1000, 256)
+	greedyJob.TaskGroups[0].Count = 3
+	must.NoError(t, h.State.UpsertJob(structs.MsgTypeTestSetup, h.NextIndex(), nil, greedyJob))
+	var greedyAllocs []*structs.Allocation
+	for i := 0; i < 3; i++ {
+		a := createAlloc(uuid.Generate(), greedyJob, greedyJob.TaskGroups[0].Tasks[0].Resources)
+		a.NodeID = node.ID
+		greedyAllocs = append(greedyAllocs, a)
+	}
+	must.NoError(t, h.State.UpsertAllocs(structs.MsgTypeTestSetup, h.NextIndex(), greedyAllocs))
+
+	// Incoming non-greedy needs 2500 CPU. Free (non-greedy) on node is 4000;
+	// no devices or ports are claimed. After kept-greedy is added back to
+	// the fit check, total = 3000 (greedy) + 2500 (new) = 5500 > 4000 →
+	// AllocsFit fails → greedy-shortfall step evicts exactly 2 of the 3
+	// greedy allocs.
+	newJob := nonGPUJob(50, false, 2500, 256)
+	runJobEval(t, h, newJob)
+
+	must.Len(t, 1, h.Plans)
+	plan := h.Plans[0]
+	must.MapContainsKey(t, plan.NodeAllocation, node.ID)
+	preempted := plan.NodePreemptions[node.ID]
+	must.Len(t, 2, preempted,
+		must.Sprintf("expected exactly 2 greedy evictions to cover the CPU shortfall"))
+
+	mustPlanApplierFit(t, node, plan, greedyAllocs)
+}
+
+// TestPreemption_Greedy_FallbackToGeneralPreemptionWhenNoGreedyCovers
+// verifies that when greedy alone can't cover the demand (device + RAM),
+// general preemption runs to evict a delta-eligible non-greedy victim AND
+// the greedy victim from the masking step is still included.
+func TestPreemption_Greedy_FallbackToGeneralPreemptionWhenNoGreedyCovers(t *testing.T) {
+	ci.Parallel(t)
+	h := NewHarness(t)
+
+	node := greedyGPUNode(t, 1)
+	must.NoError(t, h.State.UpsertNode(structs.MsgTypeTestSetup, h.NextIndex(), node))
+	// Both feature flags on — general preemption is required to evict
+	// the low-priority non-greedy alloc.
+	enableGreedyPreemption(t, h, structs.PreemptionConfig{ServiceSchedulerEnabled: true})
+
+	greedyJob := greedyGPUJob(50, true)
+	must.NoError(t, h.State.UpsertJob(structs.MsgTypeTestSetup, h.NextIndex(), nil, greedyJob))
+	greedyAlloc := createAllocWithDevice(uuid.Generate(), greedyJob, greedyJob.TaskGroups[0].Tasks[0].Resources,
+		&structs.AllocatedDeviceResource{Type: "gpu", Vendor: "nvidia", Name: "1080ti", DeviceIDs: []string{"dev0"}})
+	greedyAlloc.NodeID = node.ID
+
+	// Low-priority non-greedy hogging most of the RAM. New alloc's RAM ask
+	// is larger than what greedy alone holds, so general preemption must
+	// also evict this one.
+	lowPriJob := nonGPUJob(1, false, 1000, 6000)
+	must.NoError(t, h.State.UpsertJob(structs.MsgTypeTestSetup, h.NextIndex(), nil, lowPriJob))
+	lowPriAlloc := createAlloc(uuid.Generate(), lowPriJob, lowPriJob.TaskGroups[0].Tasks[0].Resources)
+	lowPriAlloc.NodeID = node.ID
+
+	must.NoError(t, h.State.UpsertAllocs(structs.MsgTypeTestSetup, h.NextIndex(), []*structs.Allocation{greedyAlloc, lowPriAlloc}))
+
+	// New alloc wants GPU + 5000 MB RAM. Greedy holds 256 MB; lowPri holds
+	// 6000 MB. Without lowPri eviction, RAM doesn't fit.
+	newJob := greedyGPUJob(50, false)
+	newJob.TaskGroups[0].Tasks[0].Resources.MemoryMB = 5000
+	runJobEval(t, h, newJob)
+
+	must.Len(t, 1, h.Plans)
+	plan := h.Plans[0]
+	preempted := plan.NodePreemptions[node.ID]
+	must.Len(t, 2, preempted,
+		must.Sprintf("expected greedy + low-priority both evicted; got %d", len(preempted)))
+	ids := map[string]struct{}{}
+	for _, a := range preempted {
+		ids[a.ID] = struct{}{}
+	}
+	must.MapContainsKey(t, ids, greedyAlloc.ID,
+		must.Sprintf("greedy must be evicted (it holds the GPU)"))
+	must.MapContainsKey(t, ids, lowPriAlloc.ID,
+		must.Sprintf("low-priority non-greedy must be evicted via general preemption fallback"))
+
+	mustPlanApplierFit(t, node, plan, []*structs.Allocation{greedyAlloc, lowPriAlloc})
+}
+
+// TestPreemption_Greedy_ScoringNotAffectedByGreedyPresence verifies the
+// "zero-cost" invariant on scoring: a node carrying a greedy alloc must
+// score the same (on the "binpack" component) as an identical node without
+// any greedy alloc, because masking removes greedy from resource accounting
+// before scoring.
+func TestPreemption_Greedy_ScoringNotAffectedByGreedyPresence(t *testing.T) {
+	ci.Parallel(t)
+	h := NewHarness(t)
+
+	nodeA := greedyGPUNode(t, 1)
+	nodeB := greedyGPUNode(t, 1)
+	must.NoError(t, h.State.UpsertNode(structs.MsgTypeTestSetup, h.NextIndex(), nodeA))
+	must.NoError(t, h.State.UpsertNode(structs.MsgTypeTestSetup, h.NextIndex(), nodeB))
+	enableGreedyPreemption(t, h, structs.PreemptionConfig{})
+
+	// Only B has a greedy alloc holding its GPU.
+	greedyJob := greedyGPUJob(50, true)
+	must.NoError(t, h.State.UpsertJob(structs.MsgTypeTestSetup, h.NextIndex(), nil, greedyJob))
+	greedyAlloc := createAllocWithDevice(uuid.Generate(), greedyJob, greedyJob.TaskGroups[0].Tasks[0].Resources,
+		&structs.AllocatedDeviceResource{Type: "gpu", Vendor: "nvidia", Name: "1080ti", DeviceIDs: []string{"dev0"}})
+	greedyAlloc.NodeID = nodeB.ID
+	must.NoError(t, h.State.UpsertAllocs(structs.MsgTypeTestSetup, h.NextIndex(), []*structs.Allocation{greedyAlloc}))
+
+	newJob := greedyGPUJob(50, false)
+	runJobEval(t, h, newJob)
+
+	must.Len(t, 1, h.Plans)
+	plan := h.Plans[0]
+
+	// Find the placed alloc to inspect its Metrics.
+	var placed *structs.Allocation
+	for _, allocs := range plan.NodeAllocation {
+		if len(allocs) > 0 {
+			placed = allocs[0]
+			break
+		}
+	}
+	must.NotNil(t, placed)
+	must.NotNil(t, placed.Metrics)
+
+	scoreA, hasA := binpackScoreForNode(placed.Metrics, nodeA.ID)
+	scoreB, hasB := binpackScoreForNode(placed.Metrics, nodeB.ID)
+	must.True(t, hasA, must.Sprintf("expected score metadata for node A; got %+v", placed.Metrics.ScoreMetaData))
+	must.True(t, hasB, must.Sprintf("expected score metadata for node B; got %+v", placed.Metrics.ScoreMetaData))
+	must.Eq(t, scoreA, scoreB,
+		must.Sprintf("greedy presence on B must not change its binpack score relative to identical-but-empty A"))
+}
+
+// TestPreemption_Greedy_DistinctHostsStillBlocksPlacement verifies that
+// masking applies only to resource accounting — feasibility iterators
+// (host_volume, distinct_hosts, distinct_property) still see greedy
+// allocs. A non-greedy job with distinct_hosts is blocked from placing a
+// second alloc on a node where ANY alloc from the same job already exists,
+// greedy or not.
+func TestPreemption_Greedy_DistinctHostsStillBlocksPlacement(t *testing.T) {
+	ci.Parallel(t)
+	h := NewHarness(t)
+
+	// Two GPU nodes. A non-greedy job with count=2 + distinct_hosts wants
+	// both allocs to land. With masking only and no enforcement of
+	// feasibility, both might try to land on the same node. Feasibility
+	// should split them.
+	nodeA := greedyGPUNode(t, 1)
+	nodeB := greedyGPUNode(t, 1)
+	must.NoError(t, h.State.UpsertNode(structs.MsgTypeTestSetup, h.NextIndex(), nodeA))
+	must.NoError(t, h.State.UpsertNode(structs.MsgTypeTestSetup, h.NextIndex(), nodeB))
+	enableGreedyPreemption(t, h, structs.PreemptionConfig{})
+
+	newJob := greedyGPUJob(50, false)
+	newJob.TaskGroups[0].Count = 2
+	newJob.Constraints = append(newJob.Constraints, &structs.Constraint{
+		Operand: structs.ConstraintDistinctHosts,
+	})
+	runJobEval(t, h, newJob)
+
+	must.Len(t, 1, h.Plans)
+	plan := h.Plans[0]
+	placedOnA := len(plan.NodeAllocation[nodeA.ID])
+	placedOnB := len(plan.NodeAllocation[nodeB.ID])
+	must.Eq(t, 1, placedOnA, must.Sprintf("distinct_hosts: expected exactly one alloc on A"))
+	must.Eq(t, 1, placedOnB, must.Sprintf("distinct_hosts: expected exactly one alloc on B"))
+}
+
+// TestPreemption_Greedy_ScoringIgnoresKeptGreedyCPU verifies the zero-cost
+// invariant on scoring even when greedy allocs SURVIVE masking. Two
+// identical empty nodes A and B. Node B carries a CPU-only greedy alloc
+// (no device, no port — guaranteed non-conflicting with the new GPU
+// alloc). When the new alloc lands, the CPU-only greedy is kept, but its
+// CPU/RAM must NOT inflate node B's binpack score.
+//
+// Without Fix 1, the kept-greedy resources are appended to `proposed`
+// before AllocsFit and the returned `util` (used for scoreFit) includes
+// them — making B score higher than A and breaking placement neutrality.
+func TestPreemption_Greedy_ScoringIgnoresKeptGreedyCPU(t *testing.T) {
+	ci.Parallel(t)
+	h := NewHarness(t)
+
+	nodeA := greedyGPUNode(t, 1)
+	nodeB := greedyGPUNode(t, 1)
+	must.NoError(t, h.State.UpsertNode(structs.MsgTypeTestSetup, h.NextIndex(), nodeA))
+	must.NoError(t, h.State.UpsertNode(structs.MsgTypeTestSetup, h.NextIndex(), nodeB))
+	enableGreedyPreemption(t, h, structs.PreemptionConfig{})
+
+	// CPU-only greedy on B with substantial CPU/RAM — large enough that
+	// without masking, it would clearly tilt the binpack score.
+	cpuGreedy := nonGPUJob(50, true, 2000, 4096)
+	must.NoError(t, h.State.UpsertJob(structs.MsgTypeTestSetup, h.NextIndex(), nil, cpuGreedy))
+	cpuGreedyAlloc := createAlloc(uuid.Generate(), cpuGreedy, cpuGreedy.TaskGroups[0].Tasks[0].Resources)
+	cpuGreedyAlloc.NodeID = nodeB.ID
+	must.NoError(t, h.State.UpsertAllocs(structs.MsgTypeTestSetup, h.NextIndex(), []*structs.Allocation{cpuGreedyAlloc}))
+
+	newJob := greedyGPUJob(50, false)
+	runJobEval(t, h, newJob)
+
+	must.Len(t, 1, h.Plans)
+	plan := h.Plans[0]
+
+	// Find the placed alloc to inspect its Metrics.
+	var placed *structs.Allocation
+	for _, allocs := range plan.NodeAllocation {
+		if len(allocs) > 0 {
+			placed = allocs[0]
+			break
+		}
+	}
+	must.NotNil(t, placed)
+	must.NotNil(t, placed.Metrics)
+
+	scoreA, hasA := binpackScoreForNode(placed.Metrics, nodeA.ID)
+	scoreB, hasB := binpackScoreForNode(placed.Metrics, nodeB.ID)
+	must.True(t, hasA, must.Sprintf("expected score metadata for node A"))
+	must.True(t, hasB, must.Sprintf("expected score metadata for node B"))
+	must.Eq(t, scoreA, scoreB,
+		must.Sprintf("kept-greedy CPU/RAM on B must not change its binpack score relative to identical empty A"))
+
+	// Sanity: cpuGreedy must be in the surviving set (not evicted), since
+	// it holds no resource the new alloc claims.
+	for _, victim := range plan.NodePreemptions[nodeB.ID] {
+		must.NotEq(t, cpuGreedyAlloc.ID, victim.ID,
+			must.Sprintf("CPU-only greedy must survive — the new alloc didn't claim its CPU"))
+	}
+}
+
+// TestPreemption_Greedy_NodeMaxAllocsEvictsLowestPriority verifies that
+// when NodeMaxAllocs would be exceeded by the kept-greedy + new alloc
+// count, the masking step evicts additional greedy allocs (lowest
+// priority first) to free slots.
+//
+// Critical to this test: the count must be over by *more than one*. The
+// greedy-shortfall fallback (PreemptForTaskGroup) will opportunistically
+// evict ONE greedy alloc as a side effect of its algorithm even when no
+// resource shortfall actually exists; that masks any over-by-1 bug. Here
+// we set up over-by-2 so that without the enforceNodeMaxAllocs step,
+// greedy-shortfall would evict 1 (and still leave the count over), and
+// the node would be marked exhausted.
+func TestPreemption_Greedy_NodeMaxAllocsEvictsLowestPriority(t *testing.T) {
+	ci.Parallel(t)
+	h := NewHarness(t)
+
+	node := greedyGPUNode(t, 0)
+	node.NodeMaxAllocs = 3
+	must.NoError(t, h.State.UpsertNode(structs.MsgTypeTestSetup, h.NextIndex(), node))
+	enableGreedyPreemption(t, h, structs.PreemptionConfig{})
+
+	// 1 non-greedy + 3 greedy already on node. New non-greedy would push
+	// count to 5; the limit is 3, so over by 2. None claim overlapping
+	// device/port/core resources — the count is the only blocker.
+	nonGreedyJob := nonGPUJob(50, false, 500, 256)
+	must.NoError(t, h.State.UpsertJob(structs.MsgTypeTestSetup, h.NextIndex(), nil, nonGreedyJob))
+	nonGreedyAlloc := createAlloc(uuid.Generate(), nonGreedyJob, nonGreedyJob.TaskGroups[0].Tasks[0].Resources)
+	nonGreedyAlloc.NodeID = node.ID
+
+	g30Job := nonGPUJob(30, true, 500, 256)
+	must.NoError(t, h.State.UpsertJob(structs.MsgTypeTestSetup, h.NextIndex(), nil, g30Job))
+	g30Alloc := createAlloc(uuid.Generate(), g30Job, g30Job.TaskGroups[0].Tasks[0].Resources)
+	g30Alloc.NodeID = node.ID
+
+	g50Job := nonGPUJob(50, true, 500, 256)
+	must.NoError(t, h.State.UpsertJob(structs.MsgTypeTestSetup, h.NextIndex(), nil, g50Job))
+	g50Alloc := createAlloc(uuid.Generate(), g50Job, g50Job.TaskGroups[0].Tasks[0].Resources)
+	g50Alloc.NodeID = node.ID
+
+	g70Job := nonGPUJob(70, true, 500, 256)
+	must.NoError(t, h.State.UpsertJob(structs.MsgTypeTestSetup, h.NextIndex(), nil, g70Job))
+	g70Alloc := createAlloc(uuid.Generate(), g70Job, g70Job.TaskGroups[0].Tasks[0].Resources)
+	g70Alloc.NodeID = node.ID
+
+	must.NoError(t, h.State.UpsertAllocs(structs.MsgTypeTestSetup, h.NextIndex(),
+		[]*structs.Allocation{nonGreedyAlloc, g30Alloc, g50Alloc, g70Alloc}))
+
+	newJob := nonGPUJob(50, false, 500, 256)
+	runJobEval(t, h, newJob)
+
+	must.Len(t, 1, h.Plans)
+	plan := h.Plans[0]
+	must.MapContainsKey(t, plan.NodeAllocation, node.ID,
+		must.Sprintf("new alloc should be placed on the node after enforcing NodeMaxAllocs"))
+	preempted := plan.NodePreemptions[node.ID]
+	must.Len(t, 2, preempted, must.Sprintf("expected exactly 2 greedy victims to free 2 slots (count over by 2)"))
+	ids := map[string]struct{}{}
+	for _, a := range preempted {
+		ids[a.ID] = struct{}{}
+	}
+	// The two lowest-priority greedy allocs must be the victims.
+	must.MapContainsKey(t, ids, g30Alloc.ID, must.Sprintf("priority-30 greedy must be evicted"))
+	must.MapContainsKey(t, ids, g50Alloc.ID, must.Sprintf("priority-50 greedy must be evicted"))
+
+	mustPlanApplierFit(t, node, plan, []*structs.Allocation{nonGreedyAlloc, g30Alloc, g50Alloc, g70Alloc})
+}
+
+// TestPreemption_Greedy_NodeMaxAllocsAllGreedyEvictedWhenStillOver
+// verifies that when non-greedy occupancy alone exceeds NodeMaxAllocs,
+// the helper still evicts every kept-greedy (a defensible best effort)
+// but the downstream AllocsFit reports genuine exhaustion.
+func TestPreemption_Greedy_NodeMaxAllocsAllGreedyEvictedWhenStillOver(t *testing.T) {
+	ci.Parallel(t)
+	h := NewHarness(t)
+
+	node := greedyGPUNode(t, 0)
+	node.NodeMaxAllocs = 2
+	must.NoError(t, h.State.UpsertNode(structs.MsgTypeTestSetup, h.NextIndex(), node))
+	enableGreedyPreemption(t, h, structs.PreemptionConfig{})
+
+	// 2 non-greedy + 2 greedy already on node. Non-greedy alone equals
+	// NodeMaxAllocs; new alloc cannot land even with all greedy evicted.
+	n1Job := nonGPUJob(50, false, 500, 256)
+	must.NoError(t, h.State.UpsertJob(structs.MsgTypeTestSetup, h.NextIndex(), nil, n1Job))
+	n1 := createAlloc(uuid.Generate(), n1Job, n1Job.TaskGroups[0].Tasks[0].Resources)
+	n1.NodeID = node.ID
+	n2Job := nonGPUJob(50, false, 500, 256)
+	must.NoError(t, h.State.UpsertJob(structs.MsgTypeTestSetup, h.NextIndex(), nil, n2Job))
+	n2 := createAlloc(uuid.Generate(), n2Job, n2Job.TaskGroups[0].Tasks[0].Resources)
+	n2.NodeID = node.ID
+
+	g1Job := nonGPUJob(50, true, 500, 256)
+	must.NoError(t, h.State.UpsertJob(structs.MsgTypeTestSetup, h.NextIndex(), nil, g1Job))
+	g1 := createAlloc(uuid.Generate(), g1Job, g1Job.TaskGroups[0].Tasks[0].Resources)
+	g1.NodeID = node.ID
+	g2Job := nonGPUJob(50, true, 500, 256)
+	must.NoError(t, h.State.UpsertJob(structs.MsgTypeTestSetup, h.NextIndex(), nil, g2Job))
+	g2 := createAlloc(uuid.Generate(), g2Job, g2Job.TaskGroups[0].Tasks[0].Resources)
+	g2.NodeID = node.ID
+	must.NoError(t, h.State.UpsertAllocs(structs.MsgTypeTestSetup, h.NextIndex(),
+		[]*structs.Allocation{n1, n2, g1, g2}))
+
+	newJob := nonGPUJob(50, false, 500, 256)
+	runJobEval(t, h, newJob)
+
+	// Placement must NOT happen on this node — non-greedy alone is at the
+	// alloc-count limit. The scheduler may still create a plan with the
+	// new alloc somewhere else (no other nodes here) or no plan at all.
+	for _, plan := range h.Plans {
+		must.Eq(t, 0, len(plan.NodeAllocation[node.ID]),
+			must.Sprintf("must not place on a node whose non-greedy count already meets NodeMaxAllocs"))
+	}
+}
+
+// nonGPUJob builds a job (greedy or non-greedy) that asks only for CPU and
+// memory, with no devices or networks. Used to build filler non-greedy
+// load, low-priority preemption victims, and CPU-only greedy allocs in
+// the new test scenarios.
+func nonGPUJob(priority int, greedy bool, cpu, memoryMB int) *structs.Job {
+	j := mock.Job()
+	j.Priority = priority
+	j.TaskGroups[0].Count = 1
+	j.TaskGroups[0].Networks = nil
+	j.TaskGroups[0].Tasks[0].Services = nil
+	j.TaskGroups[0].Tasks[0].Resources.Networks = nil
+	j.TaskGroups[0].Tasks[0].Resources.CPU = cpu
+	j.TaskGroups[0].Tasks[0].Resources.MemoryMB = memoryMB
+	if greedy {
+		if j.Meta == nil {
+			j.Meta = map[string]string{}
+		}
+		j.Meta[structs.JobMetaGreedy] = "true"
+	}
+	return j
+}
+
+// mustPlanApplierFit asserts the result of an AllocsFit check that mirrors
+// what plan_apply.go validates: the node, minus preempted allocs, plus the
+// new placements, must fit under (and not collide on devices).
+func mustPlanApplierFit(t *testing.T, node *structs.Node, plan *structs.Plan, existing []*structs.Allocation) {
+	t.Helper()
+	preempted := map[string]struct{}{}
+	for _, a := range plan.NodePreemptions[node.ID] {
+		preempted[a.ID] = struct{}{}
+	}
+	var allocs []*structs.Allocation
+	for _, a := range existing {
+		if _, evicted := preempted[a.ID]; evicted {
+			continue
+		}
+		allocs = append(allocs, a)
+	}
+	allocs = append(allocs, plan.NodeAllocation[node.ID]...)
+	fit, dim, _, err := structs.AllocsFit(node, allocs, nil, true)
+	must.NoError(t, err)
+	must.True(t, fit,
+		must.Sprintf("post-plan AllocsFit failed on dimension %q for node %s — masking under-evicted",
+			dim, node.ID))
+}
+
+// binpackScoreForNode returns the binpack score for the given node from a
+// metric's ScoreMetaData, plus a bool indicating whether the entry exists.
+func binpackScoreForNode(m *structs.AllocMetric, nodeID string) (float64, bool) {
+	for _, sm := range m.ScoreMetaData {
+		if sm.NodeID == nodeID {
+			return sm.Scores["binpack"], true
+		}
+	}
+	return 0, false
+}
+
+// mapKeys returns the keys of a map (useful for diagnostic must.Sprintf
+// output).
+func mapKeys[K comparable, V any](m map[K]V) []K {
+	out := make([]K, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
 }

@@ -902,9 +902,21 @@ func (s *GenericScheduler) findPreferredNode(place placementResult) (*structs.No
 	return nil, nil
 }
 
-// selectNextOption calls the stack to get a node for placement
+// selectNextOption calls the stack to get a node for placement.
+//
+// Two passes:
+//  1. No preemption. If GreedyPreemptionEnabled is on and the incoming job is
+//     non-greedy, PreemptGreedy is also set so the bin-packer treats greedy
+//     allocs as zero-cost: their resources are masked from scoring and only
+//     the specific greedy allocs whose resources the new alloc claims are
+//     evicted.
+//  2. General preemption (when ServiceSchedulerEnabled / BatchSchedulerEnabled
+//     allows it for this job type). PreemptGreedy stays set so masking
+//     continues to apply.
+//
+// Greedy-evicts-greedy is forbidden: when the incoming job is itself greedy,
+// PreemptGreedy is never set and greedy allocs see the unmasked node state.
 func (s *GenericScheduler) selectNextOption(tg *structs.TaskGroup, selectOptions *SelectOptions) *RankedNode {
-	option := s.stack.Select(tg, selectOptions)
 	_, schedConfig, _ := s.ctx.State().SchedulerConfig()
 
 	// Check if preemption is enabled, defaults to true
@@ -921,24 +933,23 @@ func (s *GenericScheduler) selectNextOption(tg *structs.TaskGroup, selectOptions
 			enablePreemption = schedConfig.PreemptionConfig.ServiceSchedulerEnabled
 		}
 	}
-	// Run stack again with preemption enabled
-	if option == nil && enablePreemption {
-		selectOptions.Preempt = true
-		option = s.stack.Select(tg, selectOptions)
+
+	// Enable greedy masking when the feature is on and the incoming job is
+	// non-greedy. Set once and carried across both passes.
+	greedyEnabled := schedConfig != nil && schedConfig.PreemptionConfig.GreedyPreemptionEnabled
+	selectOptions.PreemptGreedy = greedyEnabled && !s.job.IsGreedy()
+
+	option := s.stack.Select(tg, selectOptions)
+	if option != nil {
+		return option
 	}
 
-	// Third pass: greedy-only preemption. Gated on
-	// PreemptionConfig.GreedyPreemptionEnabled. Only allocs marked greedy
-	// (meta.greedy="true") may be evicted, regardless of priority delta and
-	// independently of the other *SchedulerEnabled flags. Skip if the
-	// incoming job is itself greedy to prevent greedy-evicts-greedy thrash.
-	greedyEnabled := schedConfig != nil && schedConfig.PreemptionConfig.GreedyPreemptionEnabled
-	if option == nil && greedyEnabled && !s.job.IsGreedy() {
-		selectOptions.Preempt = false
-		selectOptions.PreemptGreedy = true
-		option = s.stack.Select(tg, selectOptions)
+	// Second pass: general preemption.
+	if !enablePreemption {
+		return nil
 	}
-	return option
+	selectOptions.Preempt = true
+	return s.stack.Select(tg, selectOptions)
 }
 
 // handlePreemptions sets relevant preeemption related fields.

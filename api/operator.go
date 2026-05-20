@@ -269,11 +269,16 @@ type PreemptionConfig struct {
 	BatchSchedulerEnabled    bool
 	ServiceSchedulerEnabled  bool
 
-	// GreedyPreemptionEnabled toggles the greedy-only preemption pass.
-	// When true, allocs whose job has meta.greedy="true" are preemptible
-	// by any non-greedy alloc that needs their resources, regardless of
-	// the priority-delta-of-10 rule and independently of the other
-	// *SchedulerEnabled flags. Only fires for service and batch jobs.
+	// GreedyPreemptionEnabled toggles zero-cost greedy preemption.
+	// When true, allocs whose job has meta.greedy="true" are masked from
+	// bin-pack resource accounting during service- and batch-type
+	// placements: the scheduler picks the best-fit node as if greedy
+	// allocs weren't there, then evicts only the specific greedy allocs
+	// whose device IDs, ports, or reserved cores the new alloc actually
+	// claimed. Eviction bypasses the priority-delta-of-10 rule and is
+	// independent of the other *SchedulerEnabled flags. Non-conflicting
+	// greedy allocs are left running. System and sysbatch jobs are not
+	// affected.
 	GreedyPreemptionEnabled bool
 }
 
