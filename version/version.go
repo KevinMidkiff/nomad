@@ -27,7 +27,7 @@ var (
 	VersionPrerelease = ""
 
 	// VersionMetadata is metadata further describing the build type.
-	VersionMetadata = "f9"
+	VersionMetadata = "f10"
 )
 
 // VersionInfo
