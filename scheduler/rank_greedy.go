@@ -24,6 +24,34 @@ import (
 // run upstream of BinPackIterator and intentionally still see greedy allocs:
 // only resource accounting is masked.
 
+// buildGreedyHeldDevices returns the set of device instance IDs held by the
+// given greedy allocs, keyed by device tuple. Threaded into the device
+// allocator under masking so it prefers truly-free instances over greedy-held
+// ones; without this hint, masking strips greedy allocs from the accounter
+// and a greedy-held GPU is indistinguishable from a truly-free GPU.
+func buildGreedyHeldDevices(greedy []*structs.Allocation) map[structs.DeviceIdTuple]map[string]struct{} {
+	held := make(map[structs.DeviceIdTuple]map[string]struct{})
+	for _, g := range greedy {
+		if g == nil || g.AllocatedResources == nil {
+			continue
+		}
+		for _, tr := range g.AllocatedResources.Tasks {
+			for _, dev := range tr.Devices {
+				tuple := *dev.ID()
+				set, ok := held[tuple]
+				if !ok {
+					set = make(map[string]struct{})
+					held[tuple] = set
+				}
+				for _, id := range dev.DeviceIDs {
+					set[id] = struct{}{}
+				}
+			}
+		}
+	}
+	return held
+}
+
 // splitGreedy partitions allocs into (nonGreedy, greedy) by Job.IsGreedy.
 func splitGreedy(allocs []*structs.Allocation) (nonGreedy, greedy []*structs.Allocation) {
 	for _, a := range allocs {

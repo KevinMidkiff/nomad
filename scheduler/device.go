@@ -21,6 +21,15 @@ type deviceAllocator struct {
 	*structs.DeviceAccounter
 
 	ctx Context
+
+	// greedyHeld, when set, marks device instance IDs held by surviving
+	// greedy allocs on this node. Under zero-cost greedy masking the greedy
+	// allocs are stripped from the accounter, so their held instances look
+	// "free" (v==0) — identical to truly free ones. createOffer uses this
+	// to prefer truly-free instances and fall back to greedy-held only when
+	// no free alternative satisfies the ask. Nil means "not under masking" —
+	// all v==0 instances are truly free.
+	greedyHeld map[structs.DeviceIdTuple]map[string]struct{}
 }
 
 // newDeviceAllocator returns a new device allocator. The node is used to
@@ -33,10 +42,18 @@ func newDeviceAllocator(ctx Context, n *structs.Node) *deviceAllocator {
 	}
 }
 
+// SetGreedyHeld registers the set of device instance IDs currently held by
+// greedy allocs on this node. Safe to pass nil.
+func (d *deviceAllocator) SetGreedyHeld(held map[structs.DeviceIdTuple]map[string]struct{}) {
+	d.greedyHeld = held
+}
+
 func (d *deviceAllocator) Copy() *deviceAllocator {
-	accounter := d.DeviceAccounter.Copy()
-	allocator := &deviceAllocator{accounter, d.ctx}
-	return allocator
+	return &deviceAllocator{
+		DeviceAccounter: d.DeviceAccounter.Copy(),
+		ctx:             d.ctx,
+		greedyHeld:      d.greedyHeld,
+	}
 }
 
 type memoryNodeMatcher struct {
@@ -188,12 +205,44 @@ func (d *deviceAllocator) createOffer(mem *memoryNodeMatcher, ask *structs.Reque
 			DeviceIDs: make([]string, 0, ask.Count),
 		}
 
+		// Two-pass assignment under greedy masking: prefer truly-free
+		// instances first; fall back to greedy-held only if pass 1 didn't
+		// accumulate enough to satisfy the ask. With nil greedyHeld (no
+		// masking), heldInGroup is nil and pass 1 picks from the full
+		// v==0 set — identical to pre-fix behavior.
+		heldInGroup := d.greedyHeld[id]
 		assigned := uint64(0)
-		for id, v := range devInst.Instances {
-			if v == 0 && assigned < ask.Count &&
-				d.deviceIDMatchesConstraint(id, ask.Constraints, devInst.Device) {
+		// Pass 1: truly-free (v==0 and NOT greedy-held).
+		for iid, v := range devInst.Instances {
+			if v != 0 {
+				continue
+			}
+			if _, held := heldInGroup[iid]; held {
+				continue
+			}
+			if !d.deviceIDMatchesConstraint(iid, ask.Constraints, devInst.Device) {
+				continue
+			}
+			offer.DeviceIDs = append(offer.DeviceIDs, iid)
+			assigned++
+			if assigned == ask.Count {
+				break
+			}
+		}
+		// Pass 2: greedy-held fallback.
+		if assigned < ask.Count {
+			for iid, v := range devInst.Instances {
+				if v != 0 {
+					continue
+				}
+				if _, held := heldInGroup[iid]; !held {
+					continue
+				}
+				if !d.deviceIDMatchesConstraint(iid, ask.Constraints, devInst.Device) {
+					continue
+				}
+				offer.DeviceIDs = append(offer.DeviceIDs, iid)
 				assigned++
-				offer.DeviceIDs = append(offer.DeviceIDs, id)
 				if assigned == ask.Count {
 					break
 				}
