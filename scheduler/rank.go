@@ -299,9 +299,20 @@ NEXTNODE:
 			continue
 		}
 
+		// Under masking, snapshot the device instances held by surviving
+		// greedy allocs so the device allocator can prefer truly-free
+		// instances over greedy-held ones. Without this, masking strips
+		// greedy allocs from accounting and the picker treats a greedy-
+		// held GPU as indistinguishable from a truly-free GPU.
+		var greedyHeldDevices map[structs.DeviceIdTuple]map[string]struct{}
+		if maskingActive {
+			greedyHeldDevices = buildGreedyHeldDevices(greedyOnNode)
+		}
+
 		// Create a device allocator
 		devAllocator := newDeviceAllocator(iter.ctx, option.Node)
 		devAllocator.AddAllocs(proposed)
+		devAllocator.SetGreedyHeld(greedyHeldDevices)
 
 		// Track the affinities of the devices
 		totalDeviceAffinityWeight := 0.0
@@ -691,6 +702,7 @@ NEXTNODE:
 							// use a device allocator with new set of proposed allocs
 							devAllocatorEvict := newDeviceAllocator(iter.ctx, option.Node)
 							devAllocatorEvict.AddAllocs(proposed)
+							devAllocatorEvict.SetGreedyHeld(greedyHeldDevices)
 
 							// attempt the offer again
 							offerEvict, sumAffinitiesEvict, err := devAllocatorEvict.createOffer(memory, device)
