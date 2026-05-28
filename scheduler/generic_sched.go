@@ -961,26 +961,12 @@ func (s *GenericScheduler) handlePreemptions(option *RankedNode, alloc *structs.
 	// If this placement involves preemption, set DesiredState to evict for those allocations
 	var preemptedAllocIDs []string
 	for i, stop := range option.PreemptedAllocs {
-		s.plan.AppendPreemptedAlloc(stop, alloc.ID)
-		preemptedAllocIDs = append(preemptedAllocIDs, stop.ID)
-
 		reason := ""
 		if i < len(option.PreemptedReasons) {
 			reason = option.PreemptedReasons[i]
 		}
-		s.logger.Named("preempt").Info("committed preemption",
-			"eval_id", s.eval.ID,
-			"placement_job_id", alloc.JobID,
-			"placement_namespace", alloc.Namespace,
-			"placement_tg", missing.TaskGroup().Name,
-			"placement_alloc_id", alloc.ID,
-			"node_id", alloc.NodeID,
-			"victim_alloc_id", stop.ID,
-			"victim_job_id", stop.JobID,
-			"victim_namespace", stop.Namespace,
-			"victim_is_greedy", stop.IsGreedy(),
-			"reason", reason,
-		)
+		s.plan.AppendPreemptedAlloc(stop, alloc.ID, reason)
+		preemptedAllocIDs = append(preemptedAllocIDs, stop.ID)
 
 		if s.eval.AnnotatePlan && s.plan.Annotations != nil {
 			s.plan.Annotations.PreemptedAllocs = append(s.plan.Annotations.PreemptedAllocs, stop.Stub(nil))

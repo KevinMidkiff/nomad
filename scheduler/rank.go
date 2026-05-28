@@ -339,9 +339,10 @@ NEXTNODE:
 		var allocsToPreempt []*structs.Allocation
 		var preemptReasons []string
 
-		// addPreemptions records evictions with a categorical reason and emits
-		// an Info-level log per victim. Use this anywhere we add to
-		// allocsToPreempt so the parallel reasons slice and logs stay in sync.
+		// addPreemptions records evictions with a categorical reason. The
+		// reason is surfaced on the victim alloc's DesiredDescription via
+		// Plan.AppendPreemptedAlloc + NormalizeAllocations preservation, so
+		// no per-victim log is emitted here.
 		addPreemptions := func(victims []*structs.Allocation, reasons []string, fallback string) {
 			for i, a := range victims {
 				if a == nil {
@@ -353,22 +354,13 @@ NEXTNODE:
 				}
 				allocsToPreempt = append(allocsToPreempt, a)
 				preemptReasons = append(preemptReasons, reason)
-				iter.ctx.Logger().Named("preempt").Info("alloc selected for eviction",
-					"alloc_id", a.ID,
-					"victim_job_id", a.JobID,
-					"victim_namespace", a.Namespace,
-					"victim_is_greedy", a.IsGreedy(),
-					"node_id", option.Node.ID,
-					"placement_job_id", iter.jobId.ID,
-					"placement_tg", iter.taskGroup.Name,
-					"reason", reason,
-				)
 			}
 		}
 
-		// skipNode logs an Info line describing why this node was rejected
-		// and records the corresponding ExhaustedNode metric. Use this in
-		// place of bare ExhaustedNode calls in the greedy/preempt paths.
+		// skipNode logs why this node was rejected and records the
+		// corresponding ExhaustedNode metric. A skipped node produces no
+		// victim alloc to attach a reason to, so the log line is the only
+		// signal available — kept at Info.
 		skipNode := func(reason, dim string) {
 			iter.ctx.Logger().Named("preempt").Info("node skipped",
 				"node_id", option.Node.ID,

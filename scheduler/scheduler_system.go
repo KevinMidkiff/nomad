@@ -503,8 +503,12 @@ func (s *SystemScheduler) computePlacements(place []allocTuple, existingByTaskGr
 		// If this placement involves preemption, set DesiredState to evict for those allocations
 		if option.PreemptedAllocs != nil {
 			var preemptedAllocIDs []string
-			for _, stop := range option.PreemptedAllocs {
-				s.plan.AppendPreemptedAlloc(stop, alloc.ID)
+			for i, stop := range option.PreemptedAllocs {
+				reason := ""
+				if i < len(option.PreemptedReasons) {
+					reason = option.PreemptedReasons[i]
+				}
+				s.plan.AppendPreemptedAlloc(stop, alloc.ID, reason)
 
 				preemptedAllocIDs = append(preemptedAllocIDs, stop.ID)
 				if s.eval.AnnotatePlan && s.plan.Annotations != nil {

@@ -9737,6 +9737,57 @@ func TestStateSnapshot_DenormalizeAllocationDiffSlice_AllocDoesNotExist(t *testi
 	must.Nil(t, denormalizedAllocs)
 }
 
+// TestStateSnapshot_DenormalizeAllocationDiffSlice_PreemptionDescription
+// covers both branches of the regeneration gate: a diff that already carries
+// DesiredDescription is preserved verbatim, and a diff with no description
+// falls back to the legacy "Preempted by alloc ID X" string. The fallback
+// is the rolling-upgrade path — plans submitted by pre-upgrade workers do
+// not populate the description.
+func TestStateSnapshot_DenormalizeAllocationDiffSlice_PreemptionDescription(t *testing.T) {
+	ci.Parallel(t)
+
+	state := testStateStore(t)
+	preemptingID := uuid.Generate()
+
+	withReason := mock.Alloc()
+	withoutReason := mock.Alloc()
+	must.NoError(t, state.UpsertJob(structs.MsgTypeTestSetup, 999, nil, withReason.Job))
+	must.NoError(t, state.UpsertJob(structs.MsgTypeTestSetup, 1000, nil, withoutReason.Job))
+	must.NoError(t, state.UpsertAllocs(structs.MsgTypeTestSetup, 1001,
+		[]*structs.Allocation{withReason, withoutReason}))
+
+	customDesc := fmt.Sprintf("Preempted by alloc ID %v (greedy-shortfall:cpu)", preemptingID)
+	diffs := []*structs.AllocationDiff{
+		{
+			ID:                    withReason.ID,
+			PreemptedByAllocation: preemptingID,
+			DesiredDescription:    customDesc,
+		},
+		{
+			ID:                    withoutReason.ID,
+			PreemptedByAllocation: preemptingID,
+		},
+	}
+
+	snap, err := state.Snapshot()
+	must.NoError(t, err)
+
+	out, err := snap.DenormalizeAllocationDiffSlice(diffs)
+	must.NoError(t, err)
+	must.Len(t, 2, out)
+
+	byID := map[string]*structs.Allocation{}
+	for _, a := range out {
+		byID[a.ID] = a
+	}
+	must.Eq(t, customDesc, byID[withReason.ID].DesiredDescription)
+	must.Eq(t,
+		fmt.Sprintf("Preempted by alloc ID %v", preemptingID),
+		byID[withoutReason.ID].DesiredDescription)
+	must.Eq(t, structs.AllocDesiredStatusEvict, byID[withReason.ID].DesiredStatus)
+	must.Eq(t, structs.AllocDesiredStatusEvict, byID[withoutReason.ID].DesiredStatus)
+}
+
 // TestStateStore_SnapshotMinIndex_OK asserts StateStore.SnapshotMinIndex blocks
 // until the StateStore's latest index is >= the requested index.
 func TestStateStore_SnapshotMinIndex_OK(t *testing.T) {

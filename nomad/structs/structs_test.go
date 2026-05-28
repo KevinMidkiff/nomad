@@ -5252,7 +5252,7 @@ func TestPlan_NormalizeAllocations(t *testing.T) {
 	plan.AppendStoppedAlloc(stoppedAlloc, desiredDesc, AllocClientStatusLost, "followup-eval-id")
 	preemptedAlloc := MockAlloc()
 	preemptingAllocID := uuid.Generate()
-	plan.AppendPreemptedAlloc(preemptedAlloc, preemptingAllocID)
+	plan.AppendPreemptedAlloc(preemptedAlloc, preemptingAllocID, "greedy-shortfall:cpu")
 
 	plan.NormalizeAllocations()
 
@@ -5268,6 +5268,8 @@ func TestPlan_NormalizeAllocations(t *testing.T) {
 	expectedPreemptedAlloc := &Allocation{
 		ID:                    preemptedAlloc.ID,
 		PreemptedByAllocation: preemptingAllocID,
+		DesiredDescription: fmt.Sprintf(
+			"Preempted by alloc ID %v (greedy-shortfall:cpu)", preemptingAllocID),
 	}
 	assert.Equal(t, expectedPreemptedAlloc, actualPreemptedAlloc)
 }
@@ -5309,7 +5311,7 @@ func TestPlan_AppendPreemptedAllocAppendsAllocWithUpdatedAttrs(t *testing.T) {
 	alloc := MockAlloc()
 	preemptingAllocID := uuid.Generate()
 
-	plan.AppendPreemptedAlloc(alloc, preemptingAllocID)
+	plan.AppendPreemptedAlloc(alloc, preemptingAllocID, "")
 
 	appendedAlloc := plan.NodePreemptions[alloc.NodeID][0]
 	expectedAlloc := &Allocation{
@@ -5335,11 +5337,40 @@ func TestPlan_AppendPreemptedAlloc_GreedyDescription(t *testing.T) {
 	alloc.Job.Meta = map[string]string{"greedy": "true"}
 	preemptingAllocID := uuid.Generate()
 
-	plan.AppendPreemptedAlloc(alloc, preemptingAllocID)
+	plan.AppendPreemptedAlloc(alloc, preemptingAllocID, "")
 
 	appended := plan.NodePreemptions[alloc.NodeID][0]
 	must.Eq(t, AllocDesiredStatusEvict, appended.DesiredStatus)
 	must.Eq(t, fmt.Sprintf("Greedy alloc evicted for alloc ID %v", preemptingAllocID), appended.DesiredDescription)
+}
+
+func TestPlan_AppendPreemptedAlloc_ReasonAppended(t *testing.T) {
+	ci.Parallel(t)
+	plan := &Plan{
+		NodePreemptions: make(map[string][]*Allocation),
+	}
+	alloc := MockAlloc()
+	preemptingAllocID := uuid.Generate()
+
+	plan.AppendPreemptedAlloc(alloc, preemptingAllocID, "greedy-shortfall:cpu")
+
+	appended := plan.NodePreemptions[alloc.NodeID][0]
+	must.Eq(t, fmt.Sprintf("Preempted by alloc ID %v (greedy-shortfall:cpu)", preemptingAllocID), appended.DesiredDescription)
+}
+
+func TestPlan_AppendPreemptedAlloc_GreedyReasonAppended(t *testing.T) {
+	ci.Parallel(t)
+	plan := &Plan{
+		NodePreemptions: make(map[string][]*Allocation),
+	}
+	alloc := MockAlloc()
+	alloc.Job.Meta = map[string]string{"greedy": "true"}
+	preemptingAllocID := uuid.Generate()
+
+	plan.AppendPreemptedAlloc(alloc, preemptingAllocID, "device:nvidia/gpu/h100/dev0")
+
+	appended := plan.NodePreemptions[alloc.NodeID][0]
+	must.Eq(t, fmt.Sprintf("Greedy alloc evicted for alloc ID %v (device:nvidia/gpu/h100/dev0)", preemptingAllocID), appended.DesiredDescription)
 }
 
 func TestMsgPackTags(t *testing.T) {
