@@ -7305,7 +7305,15 @@ func (s *StateSnapshot) DenormalizeAllocationDiffSlice(allocDiffs []*structs.All
 
 		if allocDiff.PreemptedByAllocation != "" {
 			allocCopy.PreemptedByAllocation = allocDiff.PreemptedByAllocation
-			allocCopy.DesiredDescription = getPreemptedAllocDesiredDescription(allocDiff.PreemptedByAllocation)
+			// Prefer the description carried on the diff (set by
+			// Plan.AppendPreemptedAlloc with the categorical reason).
+			// Fall back to the legacy uniform string when empty — that
+			// path is hit for plans submitted by pre-upgrade workers.
+			if allocDiff.DesiredDescription != "" {
+				allocCopy.DesiredDescription = allocDiff.DesiredDescription
+			} else {
+				allocCopy.DesiredDescription = getPreemptedAllocDesiredDescription(allocDiff.PreemptedByAllocation)
+			}
 			allocCopy.DesiredStatus = structs.AllocDesiredStatusEvict
 		} else {
 			// If alloc is a stopped alloc

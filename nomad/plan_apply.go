@@ -386,7 +386,11 @@ func normalizePreemptedAlloc(preemptedAlloc *structs.Allocation, now int64) *str
 	return &structs.AllocationDiff{
 		ID:                    preemptedAlloc.ID,
 		PreemptedByAllocation: preemptedAlloc.PreemptedByAllocation,
-		ModifyTime:            now,
+		// DesiredDescription carries the categorical preemption reason set
+		// by Plan.AppendPreemptedAlloc; DenormalizeAllocationDiffSlice
+		// falls back to regenerating the legacy string when empty.
+		DesiredDescription: preemptedAlloc.DesiredDescription,
+		ModifyTime:         now,
 	}
 }
 

@@ -545,7 +545,7 @@ func TestWorker_SubmitPlanNormalizedAllocations(t *testing.T) {
 	desiredDescription := "desired desc"
 	plan.AppendStoppedAlloc(stoppedAlloc, desiredDescription, structs.AllocClientStatusLost, "")
 	preemptingAllocID := uuid.Generate()
-	plan.AppendPreemptedAlloc(preemptedAlloc, preemptingAllocID)
+	plan.AppendPreemptedAlloc(preemptedAlloc, preemptingAllocID, "")
 
 	// Attempt to submit a plan
 	poolArgs := getSchedulerWorkerPoolArgsFromConfigLocked(s1.config).Copy()

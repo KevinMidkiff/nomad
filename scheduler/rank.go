@@ -41,6 +41,13 @@ type RankedNode struct {
 	// PreemptedAllocs is used by the BinpackIterator to identify allocs
 	// that should be preempted in order to make the placement
 	PreemptedAllocs []*structs.Allocation
+
+	// PreemptedReasons is a parallel slice to PreemptedAllocs giving a short
+	// categorical string per victim explaining why it was selected — e.g.
+	// "device:nvidia/gpu/h100/dev0", "port:0.0.0.0:8080", "core:5",
+	// "node-max-allocs", "greedy-shortfall", "general-preempt". Used by
+	// handlePreemptions to emit Info logs at commit time.
+	PreemptedReasons []string
 }
 
 func (r *RankedNode) GoString() string {
@@ -329,7 +336,13 @@ NEXTNODE:
 			},
 		}
 
+		// allocsToPreempt and preemptReasons are parallel slices: each index
+		// pairs a victim alloc with a categorical reason string. The reason
+		// is surfaced on the victim alloc's DesiredDescription via
+		// Plan.AppendPreemptedAlloc and preserved through NormalizeAllocations
+		// + DenormalizeAllocationDiffSlice.
 		var allocsToPreempt []*structs.Allocation
+		var preemptReasons []string
 
 		// Initialize preemptor with node
 		preemptor := NewPreemptor(iter.priority, iter.ctx, &iter.jobId)
@@ -400,6 +413,9 @@ NEXTNODE:
 					continue NEXTNODE
 				}
 				allocsToPreempt = append(allocsToPreempt, netPreemptions...)
+				for range netPreemptions {
+					preemptReasons = append(preemptReasons, "tg-network-preempt")
+				}
 
 				// First subtract out preempted allocations
 				proposed = structs.RemoveAllocs(proposed, netPreemptions)
@@ -479,6 +495,9 @@ NEXTNODE:
 						continue NEXTNODE
 					}
 					allocsToPreempt = append(allocsToPreempt, netPreemptions...)
+					for range netPreemptions {
+						preemptReasons = append(preemptReasons, "task-network-preempt")
+					}
 
 					// First subtract out preempted allocations
 					proposed = structs.RemoveAllocs(proposed, netPreemptions)
@@ -695,6 +714,9 @@ NEXTNODE:
 							}
 
 							allocsToPreempt = append(allocsToPreempt, devicePreemptions...)
+							for range devicePreemptions {
+								preemptReasons = append(preemptReasons, "device-preempt")
+							}
 
 							// subtract out preempted allocations
 							proposed = structs.RemoveAllocs(proposed, allocsToPreempt)
@@ -810,9 +832,10 @@ NEXTNODE:
 		var keptGreedy []*structs.Allocation
 		if maskingActive {
 			claimed := buildClaimedResources(total)
-			victims := selectGreedyVictims(greedyOnNode, claimed)
+			victims, reasons := selectGreedyVictims(greedyOnNode, claimed)
 			if len(victims) > 0 {
 				allocsToPreempt = append(allocsToPreempt, victims...)
+				preemptReasons = append(preemptReasons, reasons...)
 			}
 			keptGreedy = structs.RemoveAllocs(greedyOnNode, victims)
 
@@ -841,6 +864,9 @@ NEXTNODE:
 				keptGreedy, extra = enforceNodeMaxAllocs(option.Node, proposed, keptGreedy, 1)
 				if len(extra) > 0 {
 					allocsToPreempt = append(allocsToPreempt, extra...)
+					for range extra {
+						preemptReasons = append(preemptReasons, "node-max-allocs")
+					}
 				}
 			}
 		}
@@ -912,6 +938,10 @@ NEXTNODE:
 				extra := greedyShort.PreemptForTaskGroup(total)
 				if len(extra) > 0 {
 					allocsToPreempt = append(allocsToPreempt, extra...)
+					reason := fmt.Sprintf("greedy-shortfall:%s", dim)
+					for range extra {
+						preemptReasons = append(preemptReasons, reason)
+					}
 					keptGreedy = structs.RemoveAllocs(keptGreedy, extra)
 					// Re-validate against the full set. We deliberately
 					// discard the recheck's util — scoring still uses the
@@ -942,6 +972,10 @@ NEXTNODE:
 
 			preemptedAllocs := preemptor.PreemptForTaskGroup(total)
 			allocsToPreempt = append(allocsToPreempt, preemptedAllocs...)
+			reason := fmt.Sprintf("general-preempt:%s", dim)
+			for range preemptedAllocs {
+				preemptReasons = append(preemptReasons, reason)
+			}
 
 			// If we were unable to find preempted allocs to meet these requirements
 			// mark as exhausted and continue
@@ -952,6 +986,7 @@ NEXTNODE:
 		}
 		if len(allocsToPreempt) > 0 {
 			option.PreemptedAllocs = allocsToPreempt
+			option.PreemptedReasons = preemptReasons
 		}
 
 		// Score the fit normally otherwise

@@ -121,8 +121,9 @@ func TestSelectGreedyVictims_NoClaim(t *testing.T) {
 		ports:   map[string]map[int]struct{}{},
 		cores:   map[uint16]struct{}{},
 	}
-	victims := selectGreedyVictims([]*structs.Allocation{g}, c)
+	victims, reasons := selectGreedyVictims([]*structs.Allocation{g}, c)
 	must.Len(t, 0, victims)
+	must.Len(t, 0, reasons)
 }
 
 func TestSelectGreedyVictims_DeviceMatch(t *testing.T) {
@@ -148,9 +149,10 @@ func TestSelectGreedyVictims_DeviceMatch(t *testing.T) {
 		cores: map[uint16]struct{}{},
 	}
 
-	victims := selectGreedyVictims([]*structs.Allocation{gMatch, gOther, gWrongTuple}, c)
+	victims, reasons := selectGreedyVictims([]*structs.Allocation{gMatch, gOther, gWrongTuple}, c)
 	must.Len(t, 1, victims)
 	must.Eq(t, gMatch.ID, victims[0].ID)
+	must.Eq(t, "device:nvidia/gpu/h100/dev0", reasons[0])
 }
 
 func TestSelectGreedyVictims_PortMatch(t *testing.T) {
@@ -166,9 +168,10 @@ func TestSelectGreedyVictims_PortMatch(t *testing.T) {
 		},
 		cores: map[uint16]struct{}{},
 	}
-	victims := selectGreedyVictims([]*structs.Allocation{gMatch, gOther}, c)
+	victims, reasons := selectGreedyVictims([]*structs.Allocation{gMatch, gOther}, c)
 	must.Len(t, 1, victims)
 	must.Eq(t, gMatch.ID, victims[0].ID)
+	must.Eq(t, "port:10.0.0.5:8080", reasons[0])
 }
 
 func TestSelectGreedyVictims_PortMatch_DifferentIP(t *testing.T) {
@@ -183,7 +186,7 @@ func TestSelectGreedyVictims_PortMatch_DifferentIP(t *testing.T) {
 		},
 		cores: map[uint16]struct{}{},
 	}
-	victims := selectGreedyVictims([]*structs.Allocation{g}, c)
+	victims, _ := selectGreedyVictims([]*structs.Allocation{g}, c)
 	must.Len(t, 0, victims, must.Sprintf("ports on different IPs must not collide"))
 }
 
@@ -200,9 +203,10 @@ func TestSelectGreedyVictims_CoreMatch(t *testing.T) {
 		ports:   map[string]map[int]struct{}{},
 		cores:   map[uint16]struct{}{5: struct{}{}},
 	}
-	victims := selectGreedyVictims([]*structs.Allocation{gMatch, gOther}, c)
+	victims, reasons := selectGreedyVictims([]*structs.Allocation{gMatch, gOther}, c)
 	must.Len(t, 1, victims)
 	must.Eq(t, gMatch.ID, victims[0].ID)
+	must.Eq(t, "core:5", reasons[0])
 }
 
 func TestSelectGreedyVictims_Dedup_DeviceAndPort(t *testing.T) {
@@ -227,19 +231,21 @@ func TestSelectGreedyVictims_Dedup_DeviceAndPort(t *testing.T) {
 		},
 		cores: map[uint16]struct{}{},
 	}
-	victims := selectGreedyVictims([]*structs.Allocation{g}, c)
+	victims, _ := selectGreedyVictims([]*structs.Allocation{g}, c)
 	must.Len(t, 1, victims, must.Sprintf("a greedy alloc with multiple claim overlaps must appear once"))
 }
 
 func TestSelectGreedyVictims_Empty(t *testing.T) {
 	ci.Parallel(t)
 	// Empty greedy list.
-	must.Len(t, 0, selectGreedyVictims(nil, claimedResources{}))
+	victims, _ := selectGreedyVictims(nil, claimedResources{})
+	must.Len(t, 0, victims)
 	// Empty claimed.
 	g := newGreedyTestAlloc(t, true, &structs.AllocatedDeviceResource{
 		Vendor: "nvidia", Type: "gpu", Name: "h100", DeviceIDs: []string{"dev0"},
 	})
-	must.Len(t, 0, selectGreedyVictims([]*structs.Allocation{g}, claimedResources{}))
+	victims, _ = selectGreedyVictims([]*structs.Allocation{g}, claimedResources{})
+	must.Len(t, 0, victims)
 }
 
 // newGreedyTestAlloc builds a minimal *structs.Allocation suitable for the

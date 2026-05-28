@@ -12900,8 +12900,15 @@ func (p *Plan) AppendStoppedAlloc(alloc *Allocation, desiredDesc, clientStatus, 
 }
 
 // AppendPreemptedAlloc is used to append an allocation that's being preempted to the plan.
-// To minimize the size of the plan, this only sets a minimal set of fields in the allocation
-func (p *Plan) AppendPreemptedAlloc(alloc *Allocation, preemptingAllocID string) {
+// To minimize the size of the plan, this only sets a minimal set of fields in the allocation.
+// reason is a short categorical string describing why this alloc was selected (e.g.
+// "greedy-shortfall:cpu", "device:nvidia/gpu/h100/dev0", "general-preempt:memory");
+// when non-empty it is appended to DesiredDescription so operators can see it via
+// `nomad alloc status`. Plan.NormalizeAllocations and normalizePreemptedAlloc preserve
+// DesiredDescription on the wire; DenormalizeAllocationDiffSlice only regenerates the
+// legacy "Preempted by alloc ID X" string when the diff carries no description (the
+// rolling-upgrade fallback for plans submitted by older workers).
+func (p *Plan) AppendPreemptedAlloc(alloc *Allocation, preemptingAllocID, reason string) {
 	newAlloc := &Allocation{}
 	newAlloc.ID = alloc.ID
 	newAlloc.JobID = alloc.JobID
@@ -12914,6 +12921,9 @@ func (p *Plan) AppendPreemptedAlloc(alloc *Allocation, preemptingAllocID string)
 		desiredDesc = fmt.Sprintf("Greedy alloc evicted for alloc ID %v", preemptingAllocID)
 	} else {
 		desiredDesc = fmt.Sprintf("Preempted by alloc ID %v", preemptingAllocID)
+	}
+	if reason != "" {
+		desiredDesc = fmt.Sprintf("%s (%s)", desiredDesc, reason)
 	}
 	newAlloc.DesiredDescription = desiredDesc
 
@@ -12995,6 +13005,11 @@ func (p *Plan) NormalizeAllocations() {
 			allocs[i] = &Allocation{
 				ID:                    alloc.ID,
 				PreemptedByAllocation: alloc.PreemptedByAllocation,
+				// DesiredDescription carries the categorical preemption
+				// reason set by AppendPreemptedAlloc; preserve it so the
+				// applying leader can persist it on the victim alloc
+				// instead of regenerating a uniform string.
+				DesiredDescription: alloc.DesiredDescription,
 			}
 		}
 	}

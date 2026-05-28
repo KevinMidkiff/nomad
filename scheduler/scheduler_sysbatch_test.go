@@ -1812,12 +1812,13 @@ func TestSysBatch_Preemption(t *testing.T) {
 	// Look up the preempted allocs by job ID
 	ws = memdb.NewWatchSet()
 
+	expectedPrefix := fmt.Sprintf("Preempted by alloc ID %v", preemptingAllocId)
 	for _, jobId := range expectedPreemptedJobIDs {
 		out, err = h.State.AllocsByJob(ws, structs.DefaultNamespace, jobId, false)
 		must.NoError(t, err)
 		for _, alloc := range out {
 			must.Eq(t, structs.AllocDesiredStatusEvict, alloc.DesiredStatus)
-			must.Eq(t, fmt.Sprintf("Preempted by alloc ID %v", preemptingAllocId), alloc.DesiredDescription)
+			must.StrHasPrefix(t, expectedPrefix, alloc.DesiredDescription)
 		}
 	}
 
