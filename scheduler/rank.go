@@ -336,41 +336,13 @@ NEXTNODE:
 			},
 		}
 
+		// allocsToPreempt and preemptReasons are parallel slices: each index
+		// pairs a victim alloc with a categorical reason string. The reason
+		// is surfaced on the victim alloc's DesiredDescription via
+		// Plan.AppendPreemptedAlloc and preserved through NormalizeAllocations
+		// + DenormalizeAllocationDiffSlice.
 		var allocsToPreempt []*structs.Allocation
 		var preemptReasons []string
-
-		// addPreemptions records evictions with a categorical reason. The
-		// reason is surfaced on the victim alloc's DesiredDescription via
-		// Plan.AppendPreemptedAlloc + NormalizeAllocations preservation, so
-		// no per-victim log is emitted here.
-		addPreemptions := func(victims []*structs.Allocation, reasons []string, fallback string) {
-			for i, a := range victims {
-				if a == nil {
-					continue
-				}
-				reason := fallback
-				if i < len(reasons) && reasons[i] != "" {
-					reason = reasons[i]
-				}
-				allocsToPreempt = append(allocsToPreempt, a)
-				preemptReasons = append(preemptReasons, reason)
-			}
-		}
-
-		// skipNode logs why this node was rejected and records the
-		// corresponding ExhaustedNode metric. A skipped node produces no
-		// victim alloc to attach a reason to, so the log line is the only
-		// signal available — kept at Info.
-		skipNode := func(reason, dim string) {
-			iter.ctx.Logger().Named("preempt").Info("node skipped",
-				"node_id", option.Node.ID,
-				"placement_job_id", iter.jobId.ID,
-				"placement_tg", iter.taskGroup.Name,
-				"reason", reason,
-				"dimension", dim,
-			)
-			iter.ctx.Metrics().ExhaustedNode(option.Node, dim)
-		}
 
 		// Initialize preemptor with node
 		preemptor := NewPreemptor(iter.priority, iter.ctx, &iter.jobId)
@@ -440,7 +412,10 @@ NEXTNODE:
 					netIdx.Release()
 					continue NEXTNODE
 				}
-				addPreemptions(netPreemptions, nil, "tg-network-preempt")
+				allocsToPreempt = append(allocsToPreempt, netPreemptions...)
+				for range netPreemptions {
+					preemptReasons = append(preemptReasons, "tg-network-preempt")
+				}
 
 				// First subtract out preempted allocations
 				proposed = structs.RemoveAllocs(proposed, netPreemptions)
@@ -519,7 +494,10 @@ NEXTNODE:
 						netIdx.Release()
 						continue NEXTNODE
 					}
-					addPreemptions(netPreemptions, nil, "task-network-preempt")
+					allocsToPreempt = append(allocsToPreempt, netPreemptions...)
+					for range netPreemptions {
+						preemptReasons = append(preemptReasons, "task-network-preempt")
+					}
 
 					// First subtract out preempted allocations
 					proposed = structs.RemoveAllocs(proposed, netPreemptions)
@@ -735,7 +713,10 @@ NEXTNODE:
 								continue SELECT_BY_NUMA_WITH_EVICT
 							}
 
-							addPreemptions(devicePreemptions, nil, "device-preempt")
+							allocsToPreempt = append(allocsToPreempt, devicePreemptions...)
+							for range devicePreemptions {
+								preemptReasons = append(preemptReasons, "device-preempt")
+							}
 
 							// subtract out preempted allocations
 							proposed = structs.RemoveAllocs(proposed, allocsToPreempt)
@@ -853,7 +834,8 @@ NEXTNODE:
 			claimed := buildClaimedResources(total)
 			victims, reasons := selectGreedyVictims(greedyOnNode, claimed)
 			if len(victims) > 0 {
-				addPreemptions(victims, reasons, "greedy-claim-overlap")
+				allocsToPreempt = append(allocsToPreempt, victims...)
+				preemptReasons = append(preemptReasons, reasons...)
 			}
 			keptGreedy = structs.RemoveAllocs(greedyOnNode, victims)
 
@@ -881,7 +863,10 @@ NEXTNODE:
 				var extra []*structs.Allocation
 				keptGreedy, extra = enforceNodeMaxAllocs(option.Node, proposed, keptGreedy, 1)
 				if len(extra) > 0 {
-					addPreemptions(extra, nil, "node-max-allocs")
+					allocsToPreempt = append(allocsToPreempt, extra...)
+					for range extra {
+						preemptReasons = append(preemptReasons, "node-max-allocs")
+					}
 				}
 			}
 		}
@@ -952,7 +937,11 @@ NEXTNODE:
 				greedyShort.SetCandidates(combined)
 				extra := greedyShort.PreemptForTaskGroup(total)
 				if len(extra) > 0 {
-					addPreemptions(extra, nil, fmt.Sprintf("greedy-shortfall:%s", dim))
+					allocsToPreempt = append(allocsToPreempt, extra...)
+					reason := fmt.Sprintf("greedy-shortfall:%s", dim)
+					for range extra {
+						preemptReasons = append(preemptReasons, reason)
+					}
 					keptGreedy = structs.RemoveAllocs(keptGreedy, extra)
 					// Re-validate against the full set. We deliberately
 					// discard the recheck's util — scoring still uses the
@@ -969,7 +958,7 @@ NEXTNODE:
 		if !fit {
 			// Skip the node if general preemption is not enabled.
 			if !iter.evict {
-				skipNode("resource-no-fit", dim)
+				iter.ctx.Metrics().ExhaustedNode(option.Node, dim)
 				continue
 			}
 
@@ -982,12 +971,16 @@ NEXTNODE:
 			preemptor.SetCandidates(current)
 
 			preemptedAllocs := preemptor.PreemptForTaskGroup(total)
-			addPreemptions(preemptedAllocs, nil, fmt.Sprintf("general-preempt:%s", dim))
+			allocsToPreempt = append(allocsToPreempt, preemptedAllocs...)
+			reason := fmt.Sprintf("general-preempt:%s", dim)
+			for range preemptedAllocs {
+				preemptReasons = append(preemptReasons, reason)
+			}
 
 			// If we were unable to find preempted allocs to meet these requirements
 			// mark as exhausted and continue
 			if len(preemptedAllocs) == 0 {
-				skipNode("preempt-found-nothing", dim)
+				iter.ctx.Metrics().ExhaustedNode(option.Node, dim)
 				continue
 			}
 		}
