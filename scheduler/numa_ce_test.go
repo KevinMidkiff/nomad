@@ -6,6 +6,7 @@ package scheduler
 import (
 	"testing"
 
+	"github.com/hashicorp/nomad/ci"
 	"github.com/hashicorp/nomad/client/lib/idset"
 	"github.com/hashicorp/nomad/client/lib/numalib"
 	"github.com/hashicorp/nomad/client/lib/numalib/hw"
@@ -92,4 +93,90 @@ func TestCoreSelectorSelect(t *testing.T) {
 			must.Eq(t, test.expectedMhz, mhz)
 		})
 	}
+}
+
+// TestCoreSelectorSelect_GreedyHeld covers the two-pass behavior used under
+// zero-cost greedy masking: truly-free cores (availableCores minus greedyHeld)
+// are picked first, and greedy-held cores are only used to top up when the
+// ask exceeds the truly-free supply. With nil greedyHeld the picker behaves
+// exactly as in the non-masking case.
+func TestCoreSelectorSelect_GreedyHeld(t *testing.T) {
+	ci.Parallel(t)
+
+	const maxSpeed = 100
+	coreIds := []uint16{0, 1, 2, 3, 4, 5, 6, 7}
+	cores := make([]numalib.Core, len(coreIds))
+	for i, id := range coreIds {
+		cores[i] = numalib.Core{
+			ID:       hw.CoreID(id),
+			MaxSpeed: hw.MHz(maxSpeed),
+		}
+	}
+	topology := &numalib.Topology{Cores: cores}
+
+	t.Run("prefers truly-free over greedy-held", func(t *testing.T) {
+		// Greedy holds the lowest-numbered cores (0..3). Without the
+		// two-pass, Select would pick them because availableCores.Slice()
+		// is sorted and the first 4 cores are exactly the greedy-held
+		// ones. The fix should instead pick 4..7.
+		selector := &coreSelector{
+			topology:       topology,
+			availableCores: idset.From[hw.CoreID](coreIds),
+			greedyHeld:     idset.From[hw.CoreID]([]uint16{0, 1, 2, 3}),
+		}
+		ids, mhz := selector.Select(&structs.Resources{Cores: 4})
+		must.Eq(t, []uint16{4, 5, 6, 7}, ids)
+		must.Eq(t, hw.MHz(4*maxSpeed), mhz)
+	})
+
+	t.Run("falls back to greedy-held when ask exceeds truly-free", func(t *testing.T) {
+		// Greedy holds 4..7; truly-free is 0..3 (4 cores). Asking for 6
+		// cores must consume all four truly-free and top up with two
+		// greedy-held.
+		selector := &coreSelector{
+			topology:       topology,
+			availableCores: idset.From[hw.CoreID](coreIds),
+			greedyHeld:     idset.From[hw.CoreID]([]uint16{4, 5, 6, 7}),
+		}
+		ids, _ := selector.Select(&structs.Resources{Cores: 6})
+		must.Len(t, 6, ids)
+		got := make(map[uint16]struct{}, len(ids))
+		for _, id := range ids {
+			got[id] = struct{}{}
+		}
+		// All four truly-free must be present.
+		for _, id := range []uint16{0, 1, 2, 3} {
+			_, ok := got[id]
+			must.True(t, ok, must.Sprintf("truly-free core %d must be picked first", id))
+		}
+		// Exactly two of the greedy-held cores must round it out.
+		heldPicked := 0
+		for _, id := range []uint16{4, 5, 6, 7} {
+			if _, ok := got[id]; ok {
+				heldPicked++
+			}
+		}
+		must.Eq(t, 2, heldPicked)
+	})
+
+	t.Run("nil greedyHeld preserves pre-fix behavior", func(t *testing.T) {
+		selector := &coreSelector{
+			topology:       topology,
+			availableCores: idset.From[hw.CoreID](coreIds),
+		}
+		ids, mhz := selector.Select(&structs.Resources{Cores: 3})
+		must.Eq(t, []uint16{0, 1, 2}, ids)
+		must.Eq(t, hw.MHz(3*maxSpeed), mhz)
+	})
+
+	t.Run("empty greedyHeld preserves pre-fix behavior", func(t *testing.T) {
+		selector := &coreSelector{
+			topology:       topology,
+			availableCores: idset.From[hw.CoreID](coreIds),
+			greedyHeld:     idset.Empty[hw.CoreID](),
+		}
+		ids, mhz := selector.Select(&structs.Resources{Cores: 3})
+		must.Eq(t, []uint16{0, 1, 2}, ids)
+		must.Eq(t, hw.MHz(3*maxSpeed), mhz)
+	})
 }

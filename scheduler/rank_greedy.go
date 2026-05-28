@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/hashicorp/nomad/client/lib/idset"
+	"github.com/hashicorp/nomad/client/lib/numalib/hw"
 	"github.com/hashicorp/nomad/nomad/structs"
 )
 
@@ -48,6 +50,25 @@ func buildGreedyHeldDevices(greedy []*structs.Allocation) map[structs.DeviceIdTu
 					set[id] = struct{}{}
 				}
 			}
+		}
+	}
+	return held
+}
+
+// buildGreedyHeldCores returns the set of reserved core IDs held by the given
+// greedy allocs. Threaded into the coreSelector under masking so it prefers
+// truly-free cores over greedy-held ones; without this hint, masking strips
+// greedy allocs from consumedCores accounting and the picker takes the
+// first-sorted N cores from availableCores — which often lands on greedy-held
+// cores and forces an unnecessary eviction.
+func buildGreedyHeldCores(greedy []*structs.Allocation) *idset.Set[hw.CoreID] {
+	held := idset.Empty[hw.CoreID]()
+	for _, g := range greedy {
+		if g == nil || g.AllocatedResources == nil {
+			continue
+		}
+		for _, tr := range g.AllocatedResources.Tasks {
+			idset.InsertSlice(held, tr.Cpu.ReservedCores...)
 		}
 	}
 	return held
