@@ -4,6 +4,7 @@
 package scheduler
 
 import (
+	"fmt"
 	"sort"
 
 	"github.com/hashicorp/nomad/nomad/structs"
@@ -142,93 +143,102 @@ func addPortsForIP(m map[string]map[int]struct{}, ip string, reserved, dynamic [
 }
 
 // selectGreedyVictims returns the set of greedy allocs whose held resources
-// overlap with the resources claimed by the new alloc. Greedy allocs with
-// no overlap are not returned (they survive). The returned slice is
-// deduplicated by alloc.ID.
+// overlap with the resources claimed by the new alloc, along with a parallel
+// slice of reason strings describing the first overlapping resource for each
+// victim (e.g. "device:nvidia/gpu/1080ti/dev0", "port:0.0.0.0:8080",
+// "core:5"). Greedy allocs with no overlap are not returned (they survive).
+// The returned slice is deduplicated by alloc.ID.
 //
 // This handles device IDs, ports, and reserved cores by direct ID-style
 // matching. Shared CPU/RAM/disk shortfall is not handled here — the caller
 // runs Preemptor.PreemptForTaskGroup against a greedy-only candidate set
 // for that case after a fit check on the kept-greedy set.
-func selectGreedyVictims(greedy []*structs.Allocation, claimed claimedResources) []*structs.Allocation {
+func selectGreedyVictims(greedy []*structs.Allocation, claimed claimedResources) ([]*structs.Allocation, []string) {
 	if len(greedy) == 0 {
-		return nil
+		return nil, nil
 	}
 	if len(claimed.devices) == 0 && len(claimed.ports) == 0 && len(claimed.cores) == 0 {
-		return nil
+		return nil, nil
 	}
 	seen := make(map[string]struct{})
 	var victims []*structs.Allocation
+	var reasons []string
 	for _, g := range greedy {
 		if _, ok := seen[g.ID]; ok {
 			continue
 		}
-		if greedyOverlapsClaim(g, claimed) {
+		if hit, reason := greedyOverlapsClaim(g, claimed); hit {
 			seen[g.ID] = struct{}{}
 			victims = append(victims, g)
+			reasons = append(reasons, reason)
 		}
 	}
-	return victims
+	return victims, reasons
 }
 
-func greedyOverlapsClaim(g *structs.Allocation, claimed claimedResources) bool {
+// greedyOverlapsClaim reports whether the greedy alloc holds a resource that
+// the new alloc claims, and (if so) returns a categorical reason string
+// describing the first overlap encountered. Reason format is one of:
+// "device:<vendor>/<type>/<name>/<id>", "port:<ip>:<port>", or "core:<id>".
+func greedyOverlapsClaim(g *structs.Allocation, claimed claimedResources) (bool, string) {
 	if g == nil || g.AllocatedResources == nil {
-		return false
+		return false, ""
 	}
 	for _, tr := range g.AllocatedResources.Tasks {
 		for _, dev := range tr.Devices {
-			ids, ok := claimed.devices[*dev.ID()]
+			tuple := *dev.ID()
+			ids, ok := claimed.devices[tuple]
 			if !ok {
 				continue
 			}
 			for _, did := range dev.DeviceIDs {
 				if _, hit := ids[did]; hit {
-					return true
+					return true, fmt.Sprintf("device:%s/%s/%s/%s", tuple.Vendor, tuple.Type, tuple.Name, did)
 				}
 			}
 		}
 		for _, core := range tr.Cpu.ReservedCores {
 			if _, hit := claimed.cores[core]; hit {
-				return true
+				return true, fmt.Sprintf("core:%d", core)
 			}
 		}
 		for _, net := range tr.Networks {
-			if portsOverlapClaim(claimed.ports, net.IP, net.ReservedPorts, net.DynamicPorts) {
-				return true
+			if reason, hit := portsOverlapClaim(claimed.ports, net.IP, net.ReservedPorts, net.DynamicPorts); hit {
+				return true, reason
 			}
 		}
 	}
 	for _, p := range g.AllocatedResources.Shared.Ports {
 		if ipSet, ok := claimed.ports[p.HostIP]; ok {
 			if _, hit := ipSet[p.Value]; hit {
-				return true
+				return true, fmt.Sprintf("port:%s:%d", p.HostIP, p.Value)
 			}
 		}
 	}
 	for _, net := range g.AllocatedResources.Shared.Networks {
-		if portsOverlapClaim(claimed.ports, net.IP, net.ReservedPorts, net.DynamicPorts) {
-			return true
+		if reason, hit := portsOverlapClaim(claimed.ports, net.IP, net.ReservedPorts, net.DynamicPorts); hit {
+			return true, reason
 		}
 	}
-	return false
+	return false, ""
 }
 
-func portsOverlapClaim(claimedPorts map[string]map[int]struct{}, ip string, reserved, dynamic []structs.Port) bool {
+func portsOverlapClaim(claimedPorts map[string]map[int]struct{}, ip string, reserved, dynamic []structs.Port) (string, bool) {
 	ipSet, ok := claimedPorts[ip]
 	if !ok {
-		return false
+		return "", false
 	}
 	for _, p := range reserved {
 		if _, hit := ipSet[p.Value]; hit {
-			return true
+			return fmt.Sprintf("port:%s:%d", ip, p.Value), true
 		}
 	}
 	for _, p := range dynamic {
 		if _, hit := ipSet[p.Value]; hit {
-			return true
+			return fmt.Sprintf("port:%s:%d", ip, p.Value), true
 		}
 	}
-	return false
+	return "", false
 }
 
 // enforceNodeMaxAllocs ensures the post-placement alloc count on node
