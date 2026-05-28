@@ -299,14 +299,19 @@ NEXTNODE:
 			continue
 		}
 
-		// Under masking, snapshot the device instances held by surviving
-		// greedy allocs so the device allocator can prefer truly-free
-		// instances over greedy-held ones. Without this, masking strips
-		// greedy allocs from accounting and the picker treats a greedy-
-		// held GPU as indistinguishable from a truly-free GPU.
+		// Under masking, snapshot the device instances and reserved cores
+		// held by surviving greedy allocs so the device allocator and the
+		// coreSelector can prefer truly-free resources over greedy-held
+		// ones. Without these hints, masking strips greedy allocs from
+		// accounting and the pickers treat greedy-held devices/cores as
+		// indistinguishable from truly-free ones — which forces
+		// unnecessary greedy evictions whenever a greedy-held resource
+		// happens to sort first.
 		var greedyHeldDevices map[structs.DeviceIdTuple]map[string]struct{}
+		var greedyHeldCores *idset.Set[hw.CoreID]
 		if maskingActive {
 			greedyHeldDevices = buildGreedyHeldDevices(greedyOnNode)
+			greedyHeldCores = buildGreedyHeldCores(greedyOnNode)
 		}
 
 		// Create a device allocator
@@ -781,6 +786,7 @@ NEXTNODE:
 					availableCores:   availableCores,
 					shuffle:          randomizeCores,
 					deviceMemoryNode: deviceMemoryNode,
+					greedyHeld:       greedyHeldCores,
 				}).Select(task.Resources)
 
 				// mark the node as exhausted if not enough cores available given
