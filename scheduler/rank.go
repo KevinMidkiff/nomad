@@ -186,6 +186,9 @@ type BinPackIterator struct {
 	schedulerAlgorithm        structs.SchedulerAlgorithm
 	binpackScoreWeight        float64
 	deviceAffinityScoreWeight float64
+	taskGroupUsesGPU          bool
+	taskGroupRequestsGPU      bool
+	gpuResourceReservation    structs.SchedulerGPUResourceReservation
 }
 
 // NewBinPackIterator returns a BinPackIterator which tries to fit tasks
@@ -213,11 +216,15 @@ func (iter *BinPackIterator) SetJob(job *structs.Job) {
 
 func (iter *BinPackIterator) SetTaskGroup(taskGroup *structs.TaskGroup) {
 	iter.taskGroup = taskGroup
+	// Keep the legacy name-based GPU predicate for release-branch scoring
+	// behavior, but use parsed device type for the reservation policy.
+	iter.taskGroupUsesGPU = taskGroupUsesGPU(taskGroup)
+	iter.taskGroupRequestsGPU = taskGroupRequestsGPUDevice(taskGroup)
 
 	// When binpacking is enabled, override to use spread for jobs without a GPU or
 	// with specific GPUs
 	if iter.schedulerAlgorithm == structs.SchedulerAlgorithmBinpack && taskGroup != nil {
-		if taskGroupUsesGPU(taskGroup) && !taskGroupUsesSpreadGPU(taskGroup) {
+		if iter.taskGroupUsesGPU && !taskGroupUsesSpreadGPU(taskGroup) {
 			iter.scoreFit = structs.ScoreFitBinPack
 		} else {
 			iter.scoreFit = structs.ScoreFitSpread
@@ -237,11 +244,15 @@ func (iter *BinPackIterator) SetSchedulerConfiguration(schedConfig *structs.Sche
 	}
 	iter.scoreFit = scoreFn
 
-	// Set memory oversubscription.
-	iter.memoryOversubscription = schedConfig != nil && schedConfig.MemoryOversubscriptionEnabled
-
+	// Effective* helpers are nil-safe; direct fields need explicit defaults.
 	iter.binpackScoreWeight = schedConfig.EffectiveBinpackScoreWeight()
 	iter.deviceAffinityScoreWeight = schedConfig.EffectiveDeviceAffinityScoreWeight()
+	iter.memoryOversubscription = false
+	iter.gpuResourceReservation = structs.SchedulerGPUResourceReservation{}
+	if schedConfig != nil {
+		iter.memoryOversubscription = schedConfig.MemoryOversubscriptionEnabled
+		iter.gpuResourceReservation = schedConfig.GPUResourceReservation
+	}
 }
 
 func (iter *BinPackIterator) Next() *RankedNode {
@@ -348,6 +359,14 @@ NEXTNODE:
 		// + DenormalizeAllocationDiffSlice.
 		var allocsToPreempt []*structs.Allocation
 		var preemptReasons []string
+
+		if !iter.taskGroupRequestsGPU && !iter.gpuResourceReservation.IsZero() {
+			if exhausted, dim := gpuReservationCannotCompute(option.Node, proposed, iter.gpuResourceReservation); exhausted {
+				netIdx.Release()
+				iter.ctx.Metrics().ExhaustedNode(option.Node, dim)
+				continue
+			}
+		}
 
 		// Initialize preemptor with node
 		preemptor := NewPreemptor(iter.priority, iter.ctx, &iter.jobId)
@@ -898,9 +917,9 @@ NEXTNODE:
 		//     the result matches what plan_apply.go will validate.
 		// In non-masking mode the two are the same single call.
 		var (
-			fit       bool
-			dim       string
-			util      *structs.ComparableResources
+			fit  bool
+			dim  string
+			util *structs.ComparableResources
 		)
 		if maskingActive {
 			// Masked-picture fit and util (scoring).
@@ -986,6 +1005,25 @@ NEXTNODE:
 			// If we were unable to find preempted allocs to meet these requirements
 			// mark as exhausted and continue
 			if len(preemptedAllocs) == 0 {
+				iter.ctx.Metrics().ExhaustedNode(option.Node, dim)
+				continue
+			}
+		}
+		if !iter.taskGroupRequestsGPU && !iter.gpuResourceReservation.IsZero() {
+			finalAllocs := current
+			if maskingActive && len(keptGreedy) > 0 {
+				finalAllocs = make([]*structs.Allocation, 0, len(current)+len(keptGreedy))
+				finalAllocs = append(finalAllocs, current...)
+				finalAllocs = append(finalAllocs, keptGreedy...)
+			}
+			if len(allocsToPreempt) > 0 {
+				finalAllocs = structs.RemoveAllocs(finalAllocs, allocsToPreempt)
+			}
+			// Synthetic pending allocs have no client status; resource accounting
+			// treats the empty status as non-terminal, matching proposed allocs.
+			finalAllocs = append(finalAllocs, &structs.Allocation{AllocatedResources: total})
+
+			if violated, dim := GPUReservationViolated(option.Node, finalAllocs, iter.gpuResourceReservation); violated {
 				iter.ctx.Metrics().ExhaustedNode(option.Node, dim)
 				continue
 			}

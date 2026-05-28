@@ -46,6 +46,8 @@ var minAutopilotVersion = version.Must(version.NewVersion("0.8.0"))
 
 var minSchedulerConfigVersion = version.Must(version.NewVersion("0.9.0"))
 
+var minGPUResourceReservationVersion = version.Must(version.NewVersion("1.10.0-dev"))
+
 var minClusterIDVersion = version.Must(version.NewVersion("0.10.4"))
 
 var minOneTimeAuthenticationTokenVersion = version.Must(version.NewVersion("1.1.0"))
@@ -2600,8 +2602,16 @@ func (s *Server) getOrCreateSchedulerConfig() *structs.SchedulerConfiguration {
 		s.logger.Named("core").Warn("can't initialize scheduler config until all servers are above minimum version", "min_version", minSchedulerConfigVersion)
 		return nil
 	}
+	defaultSchedulerConfig := s.config.DefaultSchedulerConfig
+	if !defaultSchedulerConfig.GPUResourceReservation.IsZero() &&
+		!ServersMeetMinimumVersion(s.Members(), s.Region(), minGPUResourceReservationVersion, false) {
+		s.logger.Named("core").Warn(
+			"can't initialize scheduler config with GPU resource reservation until all servers are above minimum version",
+			"min_version", minGPUResourceReservationVersion)
+		return nil
+	}
 
-	req := structs.SchedulerSetConfigRequest{Config: s.config.DefaultSchedulerConfig}
+	req := structs.SchedulerSetConfigRequest{Config: defaultSchedulerConfig}
 	if _, _, err = s.raftApply(structs.SchedulerConfigRequestType, req); err != nil {
 		s.logger.Named("core").Error("failed to initialize config", "error", err)
 		return nil

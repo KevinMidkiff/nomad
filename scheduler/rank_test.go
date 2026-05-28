@@ -5,6 +5,7 @@ package scheduler
 
 import (
 	"sort"
+	"strconv"
 	"testing"
 
 	"github.com/hashicorp/nomad/ci"
@@ -17,6 +18,7 @@ import (
 	"github.com/hashicorp/nomad/nomad/structs"
 	"github.com/shoenig/test"
 	"github.com/shoenig/test/must"
+	"github.com/stretchr/testify/require"
 )
 
 var testSchedulerConfig = &structs.SchedulerConfiguration{
@@ -2271,6 +2273,567 @@ func TestBinPackIterator_MaxAlloc(t *testing.T) {
 		})
 	}
 }
+
+func TestBinPackIterator_GPUResourceReservation(t *testing.T) {
+	testCases := []struct {
+		name      string
+		node      *structs.Node
+		taskGroup *structs.TaskGroup
+		config    structs.SchedulerGPUResourceReservation
+		existing  []*structs.Allocation
+		planned   []*structs.Allocation
+		wantPlace bool
+		exhausted string
+	}{
+		{
+			name:      "cpu-only rejected when cpu reserve would be consumed",
+			node:      gpuReservationNode(8, 64000, 8),
+			taskGroup: gpuReservationTaskGroup(1, 100, false),
+			config:    gpuReservationConfig(1, 0),
+			exhausted: gpuReservedCPUExhaustion,
+		},
+		{
+			name:      "cpu-only rejected when memory reserve would be consumed",
+			node:      gpuReservationNode(8, 16000, 4),
+			taskGroup: gpuReservationTaskGroup(1, 9000, false),
+			config:    gpuReservationConfig(0, 2000),
+			exhausted: gpuReservedMemoryExhaustion,
+		},
+		{
+			name:      "cpu-only allowed when reservation remains available",
+			node:      gpuReservationNode(8, 16000, 4),
+			taskGroup: gpuReservationTaskGroup(3000, 4000, false),
+			config:    gpuReservationConfig(1, 2000),
+			wantPlace: true,
+		},
+		{
+			name:      "reservation scales down with GPUs already allocated",
+			node:      gpuReservationNode(8, 16000, 8),
+			taskGroup: gpuReservationTaskGroup(1500, 100, false),
+			config:    gpuReservationConfig(1, 0),
+			existing: []*structs.Allocation{
+				gpuReservationAllocation(gpuReservationNode(8, 16000, 8), 1500, 100, []string{"gpu-0", "gpu-1", "gpu-2"}, 10),
+			},
+			wantPlace: true,
+		},
+		{
+			name:      "reservation rejects when scaled free GPU reserve is exceeded",
+			node:      gpuReservationNode(8, 16000, 8),
+			taskGroup: gpuReservationTaskGroup(1501, 100, false),
+			config:    gpuReservationConfig(1, 0),
+			existing: []*structs.Allocation{
+				gpuReservationAllocation(gpuReservationNode(8, 16000, 8), 1500, 100, []string{"gpu-0", "gpu-1", "gpu-2"}, 10),
+			},
+			exhausted: gpuReservedCPUExhaustion,
+		},
+		{
+			name: "reserved cpu cores reduce schedulable core denominator",
+			node: func() *structs.Node {
+				node := gpuReservationNode(8, 16000, 4)
+				node.ReservedResources = &structs.NodeReservedResources{
+					Cpu: structs.NodeReservedCpuResources{
+						CpuShares:        2000,
+						ReservedCpuCores: []uint16{0, 1},
+					},
+				}
+				return node
+			}(),
+			taskGroup: gpuReservationTaskGroup(2001, 100, false),
+			config:    gpuReservationConfig(1, 0),
+			exhausted: gpuReservedCPUExhaustion,
+		},
+		{
+			name: "reserved cpu cores allow placement at schedulable reserve boundary",
+			node: func() *structs.Node {
+				node := gpuReservationNode(8, 16000, 4)
+				node.ReservedResources = &structs.NodeReservedResources{
+					Cpu: structs.NodeReservedCpuResources{
+						CpuShares:        2000,
+						ReservedCpuCores: []uint16{0, 1},
+					},
+				}
+				return node
+			}(),
+			taskGroup: gpuReservationTaskGroup(2000, 100, false),
+			config:    gpuReservationConfig(1, 0),
+			wantPlace: true,
+		},
+		{
+			name:      "cpu-only allowed on non-gpu node",
+			node:      gpuReservationNode(2, 2000, 0),
+			taskGroup: gpuReservationTaskGroup(2000, 1000, false),
+			config:    gpuReservationConfig(1, 1000),
+			wantPlace: true,
+		},
+		{
+			name:      "cpu-only allowed when all healthy GPUs are allocated",
+			node:      gpuReservationNode(2, 2000, 2),
+			taskGroup: gpuReservationTaskGroup(2000, 1000, false),
+			config:    gpuReservationConfig(1, 1000),
+			existing: []*structs.Allocation{
+				gpuReservationAllocation(gpuReservationNode(2, 2000, 2), 0, 0, []string{"gpu-0", "gpu-1"}, 10),
+			},
+			wantPlace: true,
+		},
+		{
+			name:      "gpu task may consume protected capacity",
+			node:      gpuReservationNode(4, 16000, 4),
+			taskGroup: gpuReservationTaskGroup(3500, 15000, true),
+			config:    gpuReservationConfig(1, 2000),
+			wantPlace: true,
+		},
+		{
+			name: "unhealthy GPUs are not counted",
+			node: func() *structs.Node {
+				node := gpuReservationNode(2, 2000, 2)
+				node.NodeResources.Devices[0].Instances[1].Healthy = false
+				return node
+			}(),
+			taskGroup: gpuReservationTaskGroup(1000, 1000, false),
+			config:    gpuReservationConfig(1, 0),
+			wantPlace: true,
+		},
+		{
+			name:      "planned allocations affect free GPU count",
+			node:      gpuReservationNode(4, 4000, 4),
+			taskGroup: gpuReservationTaskGroup(500, 100, false),
+			config:    gpuReservationConfig(1, 0),
+			planned: []*structs.Allocation{
+				gpuReservationAllocation(gpuReservationNode(4, 4000, 4), 500, 100, []string{"gpu-0"}, 10),
+			},
+			wantPlace: true,
+		},
+		{
+			name:      "terminal allocations do not hold GPUs",
+			node:      gpuReservationNode(2, 2000, 1),
+			taskGroup: gpuReservationTaskGroup(2000, 100, false),
+			config:    gpuReservationConfig(1, 0),
+			planned: []*structs.Allocation{
+				func() *structs.Allocation {
+					alloc := gpuReservationAllocation(gpuReservationNode(2, 2000, 1), 0, 0, []string{"gpu-0"}, 10)
+					alloc.ClientStatus = structs.AllocClientStatusComplete
+					return alloc
+				}(),
+			},
+			exhausted: gpuReservedCPUExhaustion,
+		},
+		{
+			name: "missing topology fails closed for cpu reservation",
+			node: func() *structs.Node {
+				node := gpuReservationNode(2, 2000, 1)
+				node.NodeResources.Processors.Topology = nil
+				return node
+			}(),
+			taskGroup: gpuReservationTaskGroup(1, 100, false),
+			config:    gpuReservationConfig(1, 0),
+			exhausted: gpuReservedCPUExhaustion,
+		},
+		{
+			name:      "device-specific reservation rejects matching GPUs",
+			node:      gpuReservationNode(4, 8000, 2),
+			taskGroup: gpuReservationTaskGroup(1, 100, false),
+			config: structs.SchedulerGPUResourceReservation{
+				DeviceReservations: []*structs.SchedulerGPUResourceReservationDevice{
+					{
+						Vendor:   "nvidia",
+						Type:     "gpu",
+						Name:     "test",
+						CPUCores: 2,
+					},
+				},
+			},
+			exhausted: gpuReservedCPUExhaustion,
+		},
+		{
+			name:      "cpu-only allowed when GPU type has no reservation rule",
+			node:      gpuReservationNode(4, 8000, 2),
+			taskGroup: gpuReservationTaskGroup(4000, 100, false),
+			config: structs.SchedulerGPUResourceReservation{
+				DeviceReservations: []*structs.SchedulerGPUResourceReservationDevice{
+					{
+						Vendor:   "nvidia",
+						Type:     "gpu",
+						Name:     "a100",
+						CPUCores: 2,
+					},
+				},
+			},
+			wantPlace: true,
+		},
+		{
+			name:      "more specific zero reservation overrides broad device reservation",
+			node:      gpuReservationNode(4, 8000, 2),
+			taskGroup: gpuReservationTaskGroup(4000, 100, false),
+			config: structs.SchedulerGPUResourceReservation{
+				DeviceReservations: []*structs.SchedulerGPUResourceReservationDevice{
+					{
+						Type:     "gpu",
+						CPUCores: 1,
+					},
+					{
+						Vendor: "nvidia",
+						Type:   "gpu",
+						Name:   "test",
+					},
+				},
+			},
+			wantPlace: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			option, ctx := runGPUReservationBinPack(t, tc.node, tc.taskGroup, tc.config, tc.existing, tc.planned, false, 50)
+			if tc.wantPlace {
+				require.NotNil(t, option)
+				return
+			}
+
+			require.Nil(t, option)
+			require.Equal(t, 1, ctx.metrics.DimensionExhausted[tc.exhausted], ctx.metrics.DimensionExhausted)
+		})
+	}
+}
+
+func TestBinPackIterator_GPUResourceReservation_IncludesKeptGreedyAllocs(t *testing.T) {
+	node := gpuReservationNode(4, 8000, 2)
+	greedy := gpuReservationAllocation(node, 0, 100, []string{"gpu-0"}, 10)
+	greedy.Job.Meta = map[string]string{structs.JobMetaGreedy: "true"}
+
+	state, ctx := testContext(t)
+	require.NoError(t, state.UpsertNode(structs.MsgTypeTestSetup, 999, node))
+	require.NoError(t, state.UpsertJobSummary(1000, mock.JobSummary(greedy.JobID)))
+	require.NoError(t, state.UpsertAllocs(structs.MsgTypeTestSetup, 1001, []*structs.Allocation{greedy}))
+
+	taskGroup := gpuReservationTaskGroup(2500, 100, false)
+	for _, task := range taskGroup.Tasks {
+		task.Resources.Canonicalize()
+	}
+
+	static := NewStaticRankIterator(ctx, []*RankedNode{{Node: node}})
+	binp := NewBinPackIterator(ctx, static, false, 50)
+	binp.evictGreedyOnly = true
+	job := mock.Job()
+	job.Priority = 50
+	binp.SetJob(job)
+	binp.SetTaskGroup(taskGroup)
+	binp.SetSchedulerConfiguration(&structs.SchedulerConfiguration{
+		SchedulerAlgorithm:     structs.SchedulerAlgorithmBinpack,
+		GPUResourceReservation: gpuReservationConfig(1, 0),
+	})
+
+	option := binp.Next()
+	require.NotNil(t, option)
+	require.Empty(t, option.PreemptedAllocs)
+}
+
+func TestGPUResourceReservation_MemoryOnlyDoesNotRequireTopology(t *testing.T) {
+	node := gpuReservationNode(2, 4000, 1)
+	node.NodeResources.Processors.Topology = nil
+	reservation := gpuReservationConfig(0, 2000)
+
+	exhausted, dim := gpuReservationCannotCompute(node, nil, reservation)
+	require.False(t, exhausted)
+	require.Empty(t, dim)
+
+	alloc := gpuReservationAllocation(node, 1, 1000, nil, 50)
+	violated, dim := GPUReservationViolated(node, []*structs.Allocation{alloc}, reservation)
+	require.False(t, violated)
+	require.Empty(t, dim)
+
+	alloc = gpuReservationAllocation(node, 1, 3000, nil, 50)
+	violated, dim = GPUReservationViolated(node, []*structs.Allocation{alloc}, reservation)
+	require.True(t, violated)
+	require.Equal(t, gpuReservedMemoryExhaustion, dim)
+}
+
+func TestGPUResourceReservation_AllCoresReservedCannotCompute(t *testing.T) {
+	node := gpuReservationNode(8, 4000, 1)
+	node.ReservedResources = &structs.NodeReservedResources{
+		Cpu: structs.NodeReservedCpuResources{
+			ReservedCpuCores: []uint16{0, 1, 2, 3, 4, 5, 6, 7},
+		},
+	}
+	reservation := gpuReservationConfig(1, 0)
+
+	exhausted, dim := gpuReservationCannotCompute(node, nil, reservation)
+	require.True(t, exhausted)
+	require.Equal(t, gpuReservedCPUExhaustion, dim)
+
+	alloc := gpuReservationAllocation(node, 1, 100, nil, 50)
+	violated, dim := GPUReservationViolated(node, []*structs.Allocation{alloc}, reservation)
+	require.True(t, violated)
+	require.Equal(t, gpuReservedCPUExhaustion, dim)
+}
+
+func TestBinPackIterator_GPUResourceReservation_Preemption(t *testing.T) {
+	testCases := []struct {
+		name             string
+		node             *structs.Node
+		taskGroup        *structs.TaskGroup
+		reservation      structs.SchedulerGPUResourceReservation
+		existing         []*structs.Allocation
+		wantPlace        bool
+		wantPreemptions  int
+		wantExhaustedDim string
+	}{
+		{
+			name:        "resource preemption cannot violate GPU reservation",
+			node:        gpuReservationNode(4, 4000, 4),
+			taskGroup:   gpuReservationTaskGroup(2000, 100, false),
+			reservation: gpuReservationConfig(1, 0),
+			existing: []*structs.Allocation{
+				gpuReservationAllocation(gpuReservationNode(4, 4000, 4), 2500, 100, nil, 10),
+			},
+			wantExhaustedDim: gpuReservedCPUExhaustion,
+		},
+		{
+			name:        "resource preemption allowed when reservation remains",
+			node:        gpuReservationNode(8, 8000, 4),
+			taskGroup:   gpuReservationTaskGroup(3000, 100, false),
+			reservation: gpuReservationConfig(1, 0),
+			existing: []*structs.Allocation{
+				gpuReservationAllocation(gpuReservationNode(8, 8000, 4), 7000, 100, nil, 10),
+			},
+			wantPlace:       true,
+			wantPreemptions: 1,
+		},
+		{
+			name:        "memory resource preemption cannot violate GPU reservation",
+			node:        gpuReservationNode(8, 16000, 4),
+			taskGroup:   gpuReservationTaskGroup(100, 9000, false),
+			reservation: gpuReservationConfig(0, 2000),
+			existing: []*structs.Allocation{
+				gpuReservationAllocation(gpuReservationNode(8, 16000, 4), 100, 10000, nil, 10),
+			},
+			wantExhaustedDim: gpuReservedMemoryExhaustion,
+		},
+		{
+			name:        "memory resource preemption allowed when reservation remains",
+			node:        gpuReservationNode(8, 16000, 4),
+			taskGroup:   gpuReservationTaskGroup(100, 8000, false),
+			reservation: gpuReservationConfig(0, 2000),
+			existing: []*structs.Allocation{
+				gpuReservationAllocation(gpuReservationNode(8, 16000, 4), 100, 10000, nil, 10),
+			},
+			wantPlace:       true,
+			wantPreemptions: 1,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			option, ctx := runGPUReservationBinPack(t, tc.node, tc.taskGroup,
+				tc.reservation, tc.existing, nil, true, 100)
+			if tc.wantPlace {
+				require.NotNil(t, option)
+				require.Len(t, option.PreemptedAllocs, tc.wantPreemptions)
+				return
+			}
+
+			require.Nil(t, option)
+			require.Equal(t, 1, ctx.metrics.DimensionExhausted[tc.wantExhaustedDim], ctx.metrics.DimensionExhausted)
+		})
+	}
+}
+
+func gpuReservationConfig(cpuCores, memoryMB int) structs.SchedulerGPUResourceReservation {
+	return structs.SchedulerGPUResourceReservation{
+		DeviceReservations: []*structs.SchedulerGPUResourceReservationDevice{
+			{
+				Type:     "gpu",
+				CPUCores: cpuCores,
+				MemoryMB: memoryMB,
+			},
+		},
+	}
+}
+
+func runGPUReservationBinPack(
+	t *testing.T,
+	node *structs.Node,
+	taskGroup *structs.TaskGroup,
+	reservation structs.SchedulerGPUResourceReservation,
+	existing []*structs.Allocation,
+	planned []*structs.Allocation,
+	evict bool,
+	priority int,
+) (*RankedNode, *EvalContext) {
+	t.Helper()
+
+	state, ctx := testContext(t)
+	require.NoError(t, state.UpsertNode(structs.MsgTypeTestSetup, 999, node))
+
+	for _, task := range taskGroup.Tasks {
+		task.Resources.Canonicalize()
+	}
+
+	if len(existing) > 0 {
+		for i, alloc := range existing {
+			alloc.NodeID = node.ID
+			if alloc.Job != nil {
+				require.NoError(t, state.UpsertJobSummary(uint64(1000+i), mock.JobSummary(alloc.JobID)))
+			}
+		}
+		require.NoError(t, state.UpsertAllocs(structs.MsgTypeTestSetup, 2000, existing))
+	}
+
+	if len(planned) > 0 {
+		for _, alloc := range planned {
+			alloc.NodeID = node.ID
+		}
+		ctx.Plan().NodeAllocation[node.ID] = planned
+	}
+
+	static := NewStaticRankIterator(ctx, []*RankedNode{{Node: node}})
+	binp := NewBinPackIterator(ctx, static, evict, priority)
+	job := mock.Job()
+	job.Priority = priority
+	binp.SetJob(job)
+	binp.SetTaskGroup(taskGroup)
+	binp.SetSchedulerConfiguration(&structs.SchedulerConfiguration{
+		SchedulerAlgorithm:     structs.SchedulerAlgorithmBinpack,
+		GPUResourceReservation: reservation,
+	})
+
+	return binp.Next(), ctx
+}
+
+func gpuReservationNode(cores, memoryMB, gpuCount int) *structs.Node {
+	cpu, processors := gpuReservationCPUResources(cores, 1000)
+
+	var devices []*structs.NodeDeviceResource
+	if gpuCount > 0 {
+		instances := make([]*structs.NodeDevice, 0, gpuCount)
+		for i := 0; i < gpuCount; i++ {
+			instances = append(instances, &structs.NodeDevice{
+				ID:      "gpu-" + strconv.Itoa(i),
+				Healthy: true,
+			})
+		}
+		devices = []*structs.NodeDeviceResource{
+			{
+				Vendor:    "nvidia",
+				Type:      "gpu",
+				Name:      "test",
+				Instances: instances,
+			},
+		}
+	}
+
+	return &structs.Node{
+		ID:        uuid.Generate(),
+		NodeClass: "gpu-reservation-test",
+		NodeResources: &structs.NodeResources{
+			Processors: processors,
+			Cpu:        cpu,
+			Memory: structs.NodeMemoryResources{
+				MemoryMB: int64(memoryMB),
+			},
+			Disk: structs.NodeDiskResources{
+				DiskMB: 1024 * 1024,
+			},
+			Devices: devices,
+		},
+		ReservedResources: &structs.NodeReservedResources{},
+	}
+}
+
+func gpuReservationCPUResources(cores, sharesPerCore int) (structs.LegacyNodeCpuResources, structs.NodeProcessorResources) {
+	topology := &numalib.Topology{
+		Distances: numalib.SLIT{[]numalib.Cost{10}},
+		Cores:     make([]numalib.Core, 0, cores),
+	}
+	for i := 0; i < cores; i++ {
+		topology.Cores = append(topology.Cores, numalib.Core{
+			SocketID:  0,
+			NodeID:    0,
+			ID:        hw.CoreID(i),
+			Grade:     numalib.Performance,
+			BaseSpeed: hw.MHz(sharesPerCore),
+		})
+	}
+	topology.SetNodes(idset.From[hw.NodeID]([]hw.NodeID{0}))
+
+	resources := &structs.NodeResources{
+		Processors: structs.NodeProcessorResources{
+			Topology: topology,
+		},
+	}
+	resources.Compatibility()
+
+	return resources.Cpu, resources.Processors
+}
+
+func gpuReservationTaskGroup(cpu, memoryMB int, gpu bool) *structs.TaskGroup {
+	resources := &structs.Resources{
+		CPU:      cpu,
+		MemoryMB: memoryMB,
+	}
+	if gpu {
+		resources.Devices = []*structs.RequestedDevice{
+			{
+				Name:  "gpu",
+				Count: 1,
+			},
+		}
+	}
+
+	return &structs.TaskGroup{
+		Name:          "web",
+		EphemeralDisk: &structs.EphemeralDisk{},
+		Tasks: []*structs.Task{
+			{
+				Name:      "web",
+				Resources: resources,
+			},
+		},
+	}
+}
+
+func gpuReservationAllocation(node *structs.Node, cpu, memoryMB int64, gpuIDs []string, priority int) *structs.Allocation {
+	job := mock.Job()
+	job.ID = uuid.Generate()
+	job.Priority = priority
+	job.TaskGroups[0].Name = "web"
+
+	taskResources := &structs.AllocatedTaskResources{
+		Cpu: structs.AllocatedCpuResources{
+			CpuShares: cpu,
+		},
+		Memory: structs.AllocatedMemoryResources{
+			MemoryMB: memoryMB,
+		},
+	}
+	if len(gpuIDs) > 0 {
+		taskResources.Devices = []*structs.AllocatedDeviceResource{
+			{
+				Vendor:    "nvidia",
+				Type:      "gpu",
+				Name:      "test",
+				DeviceIDs: gpuIDs,
+			},
+		}
+	}
+
+	return &structs.Allocation{
+		ID:            uuid.Generate(),
+		EvalID:        uuid.Generate(),
+		NodeID:        node.ID,
+		JobID:         job.ID,
+		Namespace:     structs.DefaultNamespace,
+		TaskGroup:     "web",
+		Job:           job,
+		DesiredStatus: structs.AllocDesiredStatusRun,
+		ClientStatus:  structs.AllocClientStatusRunning,
+		AllocatedResources: &structs.AllocatedResources{
+			Tasks: map[string]*structs.AllocatedTaskResources{
+				"web": taskResources,
+			},
+		},
+	}
+}
+
 func TestJobAntiAffinity_PlannedAlloc(t *testing.T) {
 	_, ctx := testContext(t)
 	nodes := []*RankedNode{
@@ -2741,6 +3304,100 @@ func TestTaskGroupUsesGPU(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			result := taskGroupUsesGPU(tc.tg)
 			test.Eq(t, tc.expected, result)
+		})
+	}
+}
+
+func TestTaskGroupRequestsGPUDevice(t *testing.T) {
+	newTaskGroup := func(devices ...*structs.RequestedDevice) *structs.TaskGroup {
+		return &structs.TaskGroup{
+			Tasks: []*structs.Task{
+				{
+					Resources: &structs.Resources{
+						Devices: devices,
+					},
+				},
+			},
+		}
+	}
+
+	tests := []struct {
+		name     string
+		tg       *structs.TaskGroup
+		expected bool
+	}{
+		{
+			name:     "nil task group",
+			tg:       nil,
+			expected: false,
+		},
+		{
+			name:     "bare gpu type",
+			tg:       newTaskGroup(&structs.RequestedDevice{Name: "gpu"}),
+			expected: true,
+		},
+		{
+			name:     "vendor gpu type",
+			tg:       newTaskGroup(&structs.RequestedDevice{Name: "nvidia/gpu"}),
+			expected: true,
+		},
+		{
+			name:     "vendor gpu type and model",
+			tg:       newTaskGroup(&structs.RequestedDevice{Name: "nvidia/gpu/A100"}),
+			expected: true,
+		},
+		{
+			name:     "type and model shape is not parsed as gpu type",
+			tg:       newTaskGroup(&structs.RequestedDevice{Name: "gpu/A100"}),
+			expected: false,
+		},
+		{
+			name:     "amd gpu type",
+			tg:       newTaskGroup(&structs.RequestedDevice{Name: "amd/gpu"}),
+			expected: true,
+		},
+		{
+			name:     "non gpu device",
+			tg:       newTaskGroup(&structs.RequestedDevice{Name: "xilinx/fpga"}),
+			expected: false,
+		},
+		{
+			name:     "empty request name",
+			tg:       newTaskGroup(&structs.RequestedDevice{}),
+			expected: false,
+		},
+		{
+			name:     "nil requested device",
+			tg:       newTaskGroup(nil),
+			expected: false,
+		},
+		{
+			name: "multiple tasks with one gpu request",
+			tg: &structs.TaskGroup{
+				Tasks: []*structs.Task{
+					{
+						Resources: &structs.Resources{
+							Devices: []*structs.RequestedDevice{
+								{Name: "xilinx/fpga"},
+							},
+						},
+					},
+					{
+						Resources: &structs.Resources{
+							Devices: []*structs.RequestedDevice{
+								{Name: "nvidia/gpu/A100"},
+							},
+						},
+					},
+				},
+			},
+			expected: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			test.Eq(t, tc.expected, taskGroupRequestsGPUDevice(tc.tg))
 		})
 	}
 }

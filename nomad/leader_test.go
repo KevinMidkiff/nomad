@@ -1807,6 +1807,66 @@ func TestServer_getLatestIndex(t *testing.T) {
 	must.Eq(t, 1013, idx)
 }
 
+func TestServer_getOrCreateSchedulerConfig_GPUResourceReservationVersionGate(t *testing.T) {
+	ci.Parallel(t)
+
+	testServer, cleanupFn := TestServer(t, func(c *Config) {
+		c.Build = "1.9.0+unittest"
+		c.DefaultSchedulerConfig.SchedulerAlgorithm = structs.SchedulerAlgorithmSpread
+		c.DefaultSchedulerConfig.MemoryOversubscriptionEnabled = true
+		c.DefaultSchedulerConfig.PauseEvalBroker = true
+		c.DefaultSchedulerConfig.GPUResourceReservation = structs.SchedulerGPUResourceReservation{
+			DeviceReservations: []*structs.SchedulerGPUResourceReservationDevice{
+				{
+					Type:     "gpu",
+					CPUCores: 1,
+					MemoryMB: 1024,
+				},
+			},
+		}
+	})
+	defer cleanupFn()
+	testutil.WaitForLeader(t, testServer.RPC)
+
+	require.Nil(t, testServer.getOrCreateSchedulerConfig())
+
+	_, config, err := testServer.State().SchedulerConfig()
+	require.NoError(t, err)
+	require.Nil(t, config)
+}
+
+func TestServer_getOrCreateSchedulerConfig_GPUResourceReservationSupportedVersion(t *testing.T) {
+	ci.Parallel(t)
+
+	expected := structs.SchedulerGPUResourceReservation{
+		DeviceReservations: []*structs.SchedulerGPUResourceReservationDevice{
+			{
+				Type:     "gpu",
+				CPUCores: 1,
+				MemoryMB: 1024,
+			},
+		},
+	}
+	testServer, cleanupFn := TestServer(t, func(c *Config) {
+		c.Build = "1.10.0-dev"
+		c.DefaultSchedulerConfig.SchedulerAlgorithm = structs.SchedulerAlgorithmSpread
+		c.DefaultSchedulerConfig.MemoryOversubscriptionEnabled = true
+		c.DefaultSchedulerConfig.PauseEvalBroker = true
+		c.DefaultSchedulerConfig.GPUResourceReservation = expected
+	})
+	defer cleanupFn()
+	testutil.WaitForLeader(t, testServer.RPC)
+
+	config := testServer.getOrCreateSchedulerConfig()
+	require.NotNil(t, config)
+	require.Equal(t, expected, config.GPUResourceReservation)
+
+	_, persisted, err := testServer.State().SchedulerConfig()
+	require.NoError(t, err)
+	require.NotNil(t, persisted)
+	require.Equal(t, expected, persisted.GPUResourceReservation)
+}
+
 func TestServer_handleEvalBrokerStateChange(t *testing.T) {
 	ci.Parallel(t)
 

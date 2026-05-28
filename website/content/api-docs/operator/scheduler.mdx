@@ -43,6 +43,9 @@ $ curl \
   "NextToken": "",
   "SchedulerConfig": {
     "CreateIndex": 5,
+    "GPUResourceReservation": {
+      "DeviceReservations": null
+    },
     "MemoryOversubscriptionEnabled": false,
     "MinAffinitySpreadScoreNodes": 100,
     "ModifyIndex": 5,
@@ -84,6 +87,18 @@ $ curl \
     to take advantage of memory oversubscription. Node pools may set their own
     [`MemoryOversubscriptionEnabled`][np_mem_oversubs] value that takes
     precedence over this global value.
+
+  - `GPUResourceReservation` `(GPUResourceReservation)` - Specifies CPU and
+    memory capacity to reserve for healthy unallocated GPUs on a node. CPU-only
+    task groups are not placed on a GPU node if the placement would leave less
+    than the summed reservation for the remaining free GPUs. GPU-using task
+    groups may consume this reserved capacity if they otherwise fit.
+
+    - `DeviceReservations` `(array<GPUResourceReservationDevice>: nil)` -
+      Optional per-device reservations. Each entry matches GPUs by
+      `Selector` (for example, `nvidia/gpu/a100`) or by `Vendor`, `Type`, and
+      `Name`; empty `Type` implies `gpu`. The most specific matching entry
+      determines the reserved `CPUCores` and `MemoryMB` for that GPU.
 
   - `RejectJobRegistration` `(bool: false)` - When `true`, the server will return
     permission denied errors for job registration, job dispatch, and job scale APIs,
@@ -160,6 +175,17 @@ server state is authoritative.
   "SchedulerAlgorithm": "spread",
   "MinAffinitySpreadScoreNodes": 200,
   "MemoryOversubscriptionEnabled": false,
+  "GPUResourceReservation": {
+    "DeviceReservations": [
+      {
+        "Vendor": "nvidia",
+        "Type": "gpu",
+        "Name": "a100",
+        "CPUCores": 4,
+        "MemoryMB": 65536
+      }
+    ]
+  },
   "RejectJobRegistration": false,
   "PauseEvalBroker": false,
   "PreemptionConfig": {
@@ -186,6 +212,18 @@ server state is authoritative.
   Tasks must specify [`memory_max`](/nomad/docs/job-specification/resources#memory_max)
   to take advantage of memory oversubscription. This value may also be set per
   [node pool][np_mem_oversubs].
+
+- `GPUResourceReservation` `(GPUResourceReservation)` - Specifies CPU and memory
+  capacity to reserve for healthy unallocated GPUs on a node. CPU-only task
+  groups are not placed on a GPU node if the placement would leave less than the
+  summed reservation for the remaining free GPUs. Omit the object or set
+  `DeviceReservations` to an empty array to disable the policy.
+
+  - `DeviceReservations` `(array<GPUResourceReservationDevice>: nil)` -
+    Optional per-device reservations. Each entry matches GPUs by
+    `Selector` (for example, `nvidia/gpu/a100`) or by `Vendor`, `Type`, and
+    `Name`; empty `Type` implies `gpu`. The most specific matching entry
+    determines the reserved `CPUCores` and `MemoryMB` for that GPU.
 
 - `RejectJobRegistration` `(bool: false)` - When `true`, the server will return
   permission denied errors for job registration, job dispatch, and job scale APIs,

@@ -16,6 +16,7 @@ import (
 	"github.com/hashicorp/nomad/helper/uuid"
 	"github.com/hashicorp/nomad/nomad/state"
 	"github.com/hashicorp/nomad/nomad/structs"
+	"github.com/hashicorp/nomad/scheduler"
 	"github.com/hashicorp/raft"
 )
 
@@ -805,7 +806,48 @@ func evaluateNodePlan(snap *state.StateSnapshot, plan *structs.Plan, nodeID stri
 
 	// Check if these allocations fit
 	fit, reason, _, err := structs.AllocsFit(node, proposed, nil, true)
-	return fit, reason, err
+	if !fit || err != nil {
+		return fit, reason, err
+	}
+
+	if !scheduler.AllocationsContainCPUOnlyPlacement(plan.NodeAllocation[nodeID]) {
+		return true, "", nil
+	}
+
+	schedConfig, err := schedulerConfigForPlan(snap, plan)
+	if err != nil {
+		return false, "", err
+	}
+	if schedConfig == nil || schedConfig.GPUResourceReservation.IsZero() {
+		return true, "", nil
+	}
+
+	if violated, dim := scheduler.GPUReservationViolated(node, proposed, schedConfig.GPUResourceReservation); violated {
+		return false, dim, nil
+	}
+
+	return true, "", nil
+}
+
+func schedulerConfigForPlan(snap *state.StateSnapshot, plan *structs.Plan) (*structs.SchedulerConfiguration, error) {
+	_, schedConfig, err := snap.SchedulerConfig()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get scheduler configuration: %v", err)
+	}
+	if schedConfig == nil {
+		return nil, nil
+	}
+
+	if plan == nil || plan.Job == nil {
+		return schedConfig, nil
+	}
+
+	pool, err := snap.NodePoolByName(nil, plan.Job.NodePool)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get job node pool %q: %v", plan.Job.NodePool, err)
+	}
+
+	return schedConfig.WithNodePool(pool), nil
 }
 
 // The plan is only valid for disconnected nodes if it only contains

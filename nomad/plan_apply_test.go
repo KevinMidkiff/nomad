@@ -1084,6 +1084,158 @@ func TestPlanApply_EvalNodePlan_NodeFull_Device(t *testing.T) {
 	require.Equal("device oversubscribed", reason)
 }
 
+func TestPlanApply_EvalNodePlan_GPUResourceReservation(t *testing.T) {
+	ci.Parallel(t)
+
+	testCases := []struct {
+		name        string
+		gpu         bool
+		allocCPU    func(*structs.Node) int64
+		wantFit     bool
+		wantReason  string
+		reservation structs.SchedulerGPUResourceReservation
+	}{
+		{
+			name: "cpu-only plan rejected when stale placement would consume reserve",
+			allocCPU: func(node *structs.Node) int64 {
+				availableCPU, reservedCPU := planApplyGPUReservationCPUThresholds(node, 2)
+				return availableCPU - reservedCPU + 1
+			},
+			wantReason:  "gpu reserved cpu",
+			reservation: planApplyGPUReservationConfig(1, 0),
+		},
+		{
+			name: "gpu plan may consume reserve",
+			gpu:  true,
+			allocCPU: func(node *structs.Node) int64 {
+				availableCPU, _ := planApplyGPUReservationCPUThresholds(node, 2)
+				return availableCPU
+			},
+			wantFit:     true,
+			reservation: planApplyGPUReservationConfig(1, 0),
+		},
+		{
+			name: "device-specific reservation is enforced by plan applier",
+			allocCPU: func(node *structs.Node) int64 {
+				availableCPU, reservedCPU := planApplyGPUReservationCPUThresholds(node, 4)
+				return availableCPU - reservedCPU + 1
+			},
+			wantReason: "gpu reserved cpu",
+			reservation: structs.SchedulerGPUResourceReservation{
+				DeviceReservations: []*structs.SchedulerGPUResourceReservationDevice{
+					{
+						Vendor:   "nvidia",
+						Type:     "gpu",
+						Name:     "1080ti",
+						CPUCores: 2,
+					},
+				},
+			},
+		},
+		{
+			name: "unmatched GPU type has no plan applier reservation",
+			allocCPU: func(node *structs.Node) int64 {
+				availableCPU, _ := planApplyGPUReservationCPUThresholds(node, 0)
+				return availableCPU
+			},
+			wantFit: true,
+			reservation: structs.SchedulerGPUResourceReservation{
+				DeviceReservations: []*structs.SchedulerGPUResourceReservationDevice{
+					{
+						Vendor:   "nvidia",
+						Type:     "gpu",
+						Name:     "a100",
+						CPUCores: 2,
+					},
+				},
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			state := testStateStore(t)
+			node := mock.NvidiaNode()
+			node.Reserved = nil
+			node.ReservedResources = &structs.NodeReservedResources{}
+
+			require.NoError(t, state.SchedulerSetConfig(999, &structs.SchedulerConfiguration{
+				GPUResourceReservation: tc.reservation,
+			}))
+			require.NoError(t, state.UpsertNode(structs.MsgTypeTestSetup, 1000, node))
+
+			alloc := planApplyGPUReservationAlloc(node, tc.allocCPU(node), 100, tc.gpu)
+			plan := &structs.Plan{
+				Job: alloc.Job,
+				NodeAllocation: map[string][]*structs.Allocation{
+					node.ID: {alloc},
+				},
+			}
+
+			snap, err := state.Snapshot()
+			require.NoError(t, err)
+
+			fit, reason, err := evaluateNodePlan(snap, plan, node.ID)
+			require.NoError(t, err)
+			require.Equal(t, tc.wantFit, fit)
+			require.Equal(t, tc.wantReason, reason)
+		})
+	}
+}
+
+func planApplyGPUReservationCPUThresholds(node *structs.Node, requiredCores int64) (int64, int64) {
+	available := node.NodeResources.Comparable()
+	available.Subtract(node.ReservedResources.Comparable())
+
+	availableCPU := available.Flattened.Cpu.CpuShares
+	schedulableCoreCount := int64(len(available.Flattened.Cpu.ReservedCores))
+	reservedCPU := (availableCPU*requiredCores + schedulableCoreCount - 1) / schedulableCoreCount
+
+	return availableCPU, reservedCPU
+}
+
+func planApplyGPUReservationConfig(cpuCores, memoryMB int) structs.SchedulerGPUResourceReservation {
+	return structs.SchedulerGPUResourceReservation{
+		DeviceReservations: []*structs.SchedulerGPUResourceReservationDevice{
+			{
+				Type:     "gpu",
+				CPUCores: cpuCores,
+				MemoryMB: memoryMB,
+			},
+		},
+	}
+}
+
+func planApplyGPUReservationAlloc(node *structs.Node, cpu, memory int64, gpu bool) *structs.Allocation {
+	alloc := mock.Alloc()
+	alloc.NodeID = node.ID
+	alloc.AllocatedResources = &structs.AllocatedResources{
+		Tasks: map[string]*structs.AllocatedTaskResources{
+			"web": {
+				Cpu: structs.AllocatedCpuResources{
+					CpuShares: cpu,
+				},
+				Memory: structs.AllocatedMemoryResources{
+					MemoryMB: memory,
+				},
+			},
+		},
+	}
+
+	if gpu {
+		alloc.AllocatedResources.Tasks["web"].Devices = []*structs.AllocatedDeviceResource{
+			{
+				Vendor:    "nvidia",
+				Type:      "gpu",
+				Name:      "1080ti",
+				DeviceIDs: []string{node.NodeResources.Devices[0].Instances[0].ID},
+			},
+		}
+	}
+
+	return alloc
+}
+
 func TestPlanApply_EvalNodePlan_UpdateExisting(t *testing.T) {
 	ci.Parallel(t)
 	alloc := mock.Alloc()

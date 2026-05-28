@@ -498,6 +498,17 @@ func TestOperator_SchedulerSetConfiguration(t *testing.T) {
   "MinAffinitySpreadScoreNodes": 200,
   "BinpackScoreWeight": 0.5,
   "DeviceAffinityScoreWeight": 0,
+  "GPUResourceReservation": {
+    "DeviceReservations": [
+      {
+        "Vendor": "nvidia",
+        "Type": "gpu",
+        "Name": "a100",
+        "CPUCores": 4,
+        "MemoryMB": 65536
+      }
+    ]
+  },
   "MemoryOversubscriptionEnabled": true,
   "PauseEvalBroker": true,
   "PreemptionConfig": {
@@ -530,8 +541,43 @@ func TestOperator_SchedulerSetConfiguration(t *testing.T) {
 		require.Equal(t, 200, reply.SchedulerConfig.EffectiveMinAffinitySpreadScoreNodes())
 		require.Equal(t, 0.5, reply.SchedulerConfig.EffectiveBinpackScoreWeight())
 		require.Equal(t, 0.0, reply.SchedulerConfig.EffectiveDeviceAffinityScoreWeight())
+		require.Equal(t, structs.SchedulerGPUResourceReservation{
+			DeviceReservations: []*structs.SchedulerGPUResourceReservationDevice{
+				{
+					Vendor:   "nvidia",
+					Type:     "gpu",
+					Name:     "a100",
+					CPUCores: 4,
+					MemoryMB: 65536,
+				},
+			},
+		}, reply.SchedulerConfig.GPUResourceReservation)
 		require.True(t, reply.SchedulerConfig.MemoryOversubscriptionEnabled)
 		require.True(t, reply.SchedulerConfig.PauseEvalBroker)
+	})
+}
+
+func TestOperator_SchedulerSetConfiguration_GPUResourceReservationValidation(t *testing.T) {
+	ci.Parallel(t)
+	httpTest(t, nil, func(s *TestAgent) {
+		body := bytes.NewBuffer([]byte(`
+{
+  "GPUResourceReservation": {
+    "DeviceReservations": [
+      {
+        "Type": "gpu",
+        "CPUCores": -1
+      }
+    ]
+  }
+}`))
+		req, _ := http.NewRequest(http.MethodPut, "/v1/operator/scheduler/configuration", body)
+		resp := httptest.NewRecorder()
+		_, err := s.Server.OperatorSchedulerConfiguration(resp, req)
+		require.NotNil(t, err)
+		coded, ok := err.(HTTPCodedError)
+		require.True(t, ok)
+		require.Equal(t, 400, coded.Code())
 	})
 }
 

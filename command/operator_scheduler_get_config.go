@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/hashicorp/cli"
+	"github.com/hashicorp/nomad/api"
 	"github.com/posener/complete"
 )
 
@@ -83,6 +84,7 @@ func (o *OperatorSchedulerGetConfig) Run(args []string) int {
 		fmt.Sprintf("Binpack Score Weight|%v", schedConfig.EffectiveBinpackScoreWeight()),
 		fmt.Sprintf("Device Affinity Score Weight|%v", schedConfig.EffectiveDeviceAffinityScoreWeight()),
 		fmt.Sprintf("Memory Oversubscription|%v", schedConfig.MemoryOversubscriptionEnabled),
+		fmt.Sprintf("GPU Device Reservations|%s", formatGPUDeviceReservations(schedConfig.GPUResourceReservation.DeviceReservations)),
 		fmt.Sprintf("Reject Job Registration|%v", schedConfig.RejectJobRegistration),
 		fmt.Sprintf("Pause Eval Broker|%v", schedConfig.PauseEvalBroker),
 		fmt.Sprintf("Preemption System Scheduler|%v", schedConfig.PreemptionConfig.SystemSchedulerEnabled),
@@ -93,6 +95,33 @@ func (o *OperatorSchedulerGetConfig) Run(args []string) int {
 		fmt.Sprintf("Modify Index|%v", resp.SchedulerConfig.ModifyIndex),
 	}))
 	return 0
+}
+
+func formatGPUDeviceReservations(devices []api.SchedulerGPUResourceReservationDevice) string {
+	if len(devices) == 0 {
+		return "none"
+	}
+
+	out := make([]string, len(devices))
+	for i, device := range devices {
+		selector := device.Selector
+		if selector == "" {
+			deviceType := device.Type
+			if deviceType == "" {
+				deviceType = "gpu"
+			}
+			selector = deviceType
+			if device.Vendor != "" {
+				selector = device.Vendor + "/" + selector
+			}
+			if device.Name != "" {
+				selector += "/" + device.Name
+			}
+		}
+		out[i] = fmt.Sprintf("%s: cpu_cores=%d memory_mb=%d", selector, device.CPUCores, device.MemoryMB)
+	}
+
+	return strings.Join(out, ", ")
 }
 
 func (o *OperatorSchedulerGetConfig) Synopsis() string {

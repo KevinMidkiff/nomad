@@ -307,10 +307,13 @@ func (s *HTTPServer) schedulerUpdateConfig(resp http.ResponseWriter, req *http.R
 	}
 
 	args.Config = structs.SchedulerConfiguration{
-		SchedulerAlgorithm:            structs.SchedulerAlgorithm(conf.SchedulerAlgorithm),
-		MinAffinitySpreadScoreNodes:   conf.MinAffinitySpreadScoreNodes,
-		BinpackScoreWeight:            conf.BinpackScoreWeight,
-		DeviceAffinityScoreWeight:     conf.DeviceAffinityScoreWeight,
+		SchedulerAlgorithm:          structs.SchedulerAlgorithm(conf.SchedulerAlgorithm),
+		MinAffinitySpreadScoreNodes: conf.MinAffinitySpreadScoreNodes,
+		BinpackScoreWeight:          conf.BinpackScoreWeight,
+		DeviceAffinityScoreWeight:   conf.DeviceAffinityScoreWeight,
+		GPUResourceReservation: structs.SchedulerGPUResourceReservation{
+			DeviceReservations: schedulerGPUResourceReservationDevicesFromAPI(conf.GPUResourceReservation.DeviceReservations),
+		},
 		MemoryOversubscriptionEnabled: conf.MemoryOversubscriptionEnabled,
 		RejectJobRegistration:         conf.RejectJobRegistration,
 		PauseEvalBroker:               conf.PauseEvalBroker,
@@ -344,6 +347,27 @@ func (s *HTTPServer) schedulerUpdateConfig(resp http.ResponseWriter, req *http.R
 	}
 	setIndex(resp, reply.Index)
 	return reply, nil
+}
+
+func schedulerGPUResourceReservationDevicesFromAPI(
+	in []api.SchedulerGPUResourceReservationDevice,
+) []*structs.SchedulerGPUResourceReservationDevice {
+	if len(in) == 0 {
+		return nil
+	}
+
+	out := make([]*structs.SchedulerGPUResourceReservationDevice, len(in))
+	for i, device := range in {
+		out[i] = &structs.SchedulerGPUResourceReservationDevice{
+			Selector: device.Selector,
+			Vendor:   device.Vendor,
+			Type:     device.Type,
+			Name:     device.Name,
+			CPUCores: device.CPUCores,
+			MemoryMB: device.MemoryMB,
+		}
+	}
+	return out
 }
 
 func (s *HTTPServer) SnapshotRequest(resp http.ResponseWriter, req *http.Request) (interface{}, error) {

@@ -29,6 +29,7 @@ func TestOperatorSchedulerGetConfig_Run(t *testing.T) {
 	must.StrContains(t, s, "Min Affinity Spread Score Nodes = 100")
 	must.StrContains(t, s, "Binpack Score Weight            = 1")
 	must.StrContains(t, s, "Device Affinity Score Weight    = 1")
+	must.StrContains(t, s, "GPU Device Reservations         = none")
 	must.StrContains(t, s, "Preemption SysBatch Scheduler   = false")
 	must.StrContains(t, s, "Preemption Greedy               = false")
 	ui.ErrorWriter.Reset()

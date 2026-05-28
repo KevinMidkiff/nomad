@@ -222,6 +222,10 @@ type SchedulerConfiguration struct {
 	// priority jobs to place higher priority jobs.
 	PreemptionConfig PreemptionConfig `hcl:"preemption_config"`
 
+	// GPUResourceReservation protects CPU and memory capacity for future GPU
+	// placements on nodes with free GPU devices.
+	GPUResourceReservation SchedulerGPUResourceReservation `hcl:"gpu_resource_reservation"`
+
 	// MemoryOversubscriptionEnabled specifies whether memory oversubscription is enabled
 	MemoryOversubscriptionEnabled bool `hcl:"memory_oversubscription_enabled"`
 
@@ -279,6 +283,16 @@ func (s *SchedulerConfiguration) Copy() *SchedulerConfiguration {
 	}
 	if s.DeviceAffinityScoreWeight != nil {
 		ns.DeviceAffinityScoreWeight = pointer.Of(*s.DeviceAffinityScoreWeight)
+	}
+	if s.GPUResourceReservation.DeviceReservations != nil {
+		ns.GPUResourceReservation.DeviceReservations = make([]*SchedulerGPUResourceReservationDevice, len(s.GPUResourceReservation.DeviceReservations))
+		for i, device := range s.GPUResourceReservation.DeviceReservations {
+			if device == nil {
+				continue
+			}
+			copied := *device
+			ns.GPUResourceReservation.DeviceReservations[i] = &copied
+		}
 	}
 	return &ns
 }
@@ -378,7 +392,120 @@ func (s *SchedulerConfiguration) Validate() error {
 		return fmt.Errorf("device_affinity_score_weight must be a finite value greater than or equal to 0")
 	}
 
+	if err := s.GPUResourceReservation.Validate(); err != nil {
+		return err
+	}
+
 	return nil
+}
+
+// SchedulerGPUResourceReservation configures how much CPU and memory capacity
+// the scheduler protects for healthy unallocated GPUs on a node.
+type SchedulerGPUResourceReservation struct {
+	DeviceReservations []*SchedulerGPUResourceReservationDevice `hcl:"device"`
+}
+
+// SchedulerGPUResourceReservationDevice configures a reservation rule for
+// GPUs matching the given device tuple. Empty Type implies gpu.
+type SchedulerGPUResourceReservationDevice struct {
+	Selector string `hcl:",key"`
+	Vendor   string `hcl:"vendor"`
+	Type     string `hcl:"type"`
+	Name     string `hcl:"name"`
+	CPUCores int    `hcl:"cpu_cores"`
+	MemoryMB int    `hcl:"memory_mb"`
+}
+
+func (r *SchedulerGPUResourceReservationDevice) ID() *DeviceIdTuple {
+	if r == nil {
+		return nil
+	}
+	if r.Selector != "" {
+		return (&RequestedDevice{Name: r.Selector}).ID()
+	}
+	deviceType := r.Type
+	if deviceType == "" {
+		deviceType = "gpu"
+	}
+	return &DeviceIdTuple{
+		Vendor: r.Vendor,
+		Type:   deviceType,
+		Name:   r.Name,
+	}
+}
+
+func (r SchedulerGPUResourceReservation) IsZero() bool {
+	return len(r.DeviceReservations) == 0
+}
+
+func (r SchedulerGPUResourceReservation) Validate() error {
+	seen := make(map[DeviceIdTuple]struct{}, len(r.DeviceReservations))
+	seenRules := make([]*SchedulerGPUResourceReservationDevice, 0, len(r.DeviceReservations))
+	for _, device := range r.DeviceReservations {
+		if device == nil {
+			continue
+		}
+		if device.Selector != "" && (device.Vendor != "" || device.Type != "" || device.Name != "") {
+			return fmt.Errorf("gpu resource reservation device must use selector or vendor/type/name, not both")
+		}
+		if device.Type != "" && device.Type != "gpu" {
+			return fmt.Errorf("gpu resource reservation device type must be gpu")
+		}
+		id := device.ID()
+		if id == nil || id.Type != "gpu" {
+			return fmt.Errorf("gpu resource reservation device type must be gpu")
+		}
+		if device.CPUCores < 0 {
+			return fmt.Errorf("gpu resource reservation device cpu cores must be greater than or equal to zero")
+		}
+		if device.MemoryMB < 0 {
+			return fmt.Errorf("gpu resource reservation device memory MB must be greater than or equal to zero")
+		}
+		if _, ok := seen[*id]; ok {
+			return fmt.Errorf("duplicate gpu resource reservation device for %s", id.String())
+		}
+		for _, seenRule := range seenRules {
+			if device.Overlaps(seenRule) && device.Specificity() == seenRule.Specificity() {
+				return fmt.Errorf("ambiguous gpu resource reservation device rules for %s and %s", id.String(), seenRule.ID().String())
+			}
+		}
+		seen[*id] = struct{}{}
+		seenRules = append(seenRules, device)
+	}
+	return nil
+}
+
+func (r *SchedulerGPUResourceReservationDevice) Specificity() int {
+	id := r.ID()
+	if id == nil {
+		return 0
+	}
+	var specificity int
+	if id.Vendor != "" {
+		specificity++
+	}
+	if id.Type != "" {
+		specificity++
+	}
+	if id.Name != "" {
+		specificity++
+	}
+	return specificity
+}
+
+func (r *SchedulerGPUResourceReservationDevice) Overlaps(other *SchedulerGPUResourceReservationDevice) bool {
+	id := r.ID()
+	otherID := other.ID()
+	if id == nil || otherID == nil {
+		return false
+	}
+	return gpuReservationDeviceFieldOverlaps(id.Vendor, otherID.Vendor) &&
+		gpuReservationDeviceFieldOverlaps(id.Type, otherID.Type) &&
+		gpuReservationDeviceFieldOverlaps(id.Name, otherID.Name)
+}
+
+func gpuReservationDeviceFieldOverlaps(a, b string) bool {
+	return a == "" || b == "" || a == b
 }
 
 func invalidSchedulerScoreWeight(weight float64) bool {

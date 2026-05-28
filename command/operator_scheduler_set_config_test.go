@@ -38,9 +38,8 @@ func TestOperatorSchedulerSetConfig_Run(t *testing.T) {
 	must.NoError(t, err)
 	schedulerConfigEquals(t, bootstrappedConfig.SchedulerConfig, nonModifiedConfig.SchedulerConfig)
 
-	// Modify every configuration parameter using the flags. This ensures the
-	// merging is working correctly and that operators can control the entire
-	// object via the CLI.
+	// Modify every configuration parameter exposed as a flag. This ensures the
+	// merging is working correctly.
 	minAffinitySpreadScoreNodes := 200
 	binpackScoreWeight := 0.5
 	deviceAffinityScoreWeight := 0.0
@@ -117,6 +116,7 @@ func TestOperatorSchedulerSetConfig_Run(t *testing.T) {
 	must.StrContains(t, ui.OutputWriter.String(), "Scheduler configuration updated!")
 	ui.ErrorWriter.Reset()
 	ui.OutputWriter.Reset()
+
 }
 
 func schedulerConfigEquals(t *testing.T, expected, actual *api.SchedulerConfiguration) {
@@ -128,4 +128,5 @@ func schedulerConfigEquals(t *testing.T, expected, actual *api.SchedulerConfigur
 	must.Eq(t, expected.MemoryOversubscriptionEnabled, actual.MemoryOversubscriptionEnabled)
 	must.Eq(t, expected.PauseEvalBroker, actual.PauseEvalBroker)
 	must.Eq(t, expected.PreemptionConfig, actual.PreemptionConfig)
+	must.Eq(t, expected.GPUResourceReservation, actual.GPUResourceReservation)
 }

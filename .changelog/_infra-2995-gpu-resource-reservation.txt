@@ -1,0 +1,34 @@
+```release-note:feature
+scheduler: Added per-GPU-type scheduler configuration for reserving CPU cores and memory for future GPU workloads. Nomad now protects the configured CPU and memory for each healthy unallocated GPU that matches a `GPUResourceReservation.DeviceReservations` rule, and rejects CPU-only placements that would consume that capacity. GPU-using task groups may consume the reserved capacity if they otherwise fit.
+
+Configure this live with the scheduler configuration API (`PUT /v1/operator/scheduler/configuration`) by setting `GPUResourceReservation.DeviceReservations`. Each entry may match by `Selector` (for example `nvidia/gpu/a100`) or by `Vendor`, `Type`, and `Name`; an empty `Type` implies `gpu`.
+
+Example scheduler configuration API payload fragment:
+
+~~~json
+"GPUResourceReservation": {
+  "DeviceReservations": [
+    {
+      "Selector": "nvidia/gpu/a100",
+      "CPUCores": 4,
+      "MemoryMB": 65536
+    }
+  ]
+}
+~~~
+
+For bootstrap-only server configuration, use `server.default_scheduler_config.gpu_resource_reservation` with labeled `device` blocks:
+
+~~~hcl
+default_scheduler_config {
+  gpu_resource_reservation {
+    device "nvidia/gpu/a100" {
+      cpu_cores = 4
+      memory_mb = 65536
+    }
+  }
+}
+~~~
+
+There is intentionally no global/default per-GPU reservation. GPUs with no matching device reservation rule do not reserve CPU or memory. Existing clusters should update the live scheduler configuration stored in Raft; `default_scheduler_config` is only used before the scheduler config is first initialized.
+```

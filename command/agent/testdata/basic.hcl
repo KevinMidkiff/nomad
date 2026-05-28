@@ -170,6 +170,13 @@ server {
       service_scheduler_enabled  = true
       greedy_preemption_enabled  = true
     }
+
+    gpu_resource_reservation {
+      device "nvidia/gpu/a100" {
+        cpu_cores = 4
+        memory_mb = 65536
+      }
+    }
   }
 
   license_path = "/tmp/nomad.hclic"
