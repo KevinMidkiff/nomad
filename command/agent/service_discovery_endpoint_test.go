@@ -10,10 +10,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/go-msgpack/v2/codec"
 	"github.com/hashicorp/nomad/acl"
 	"github.com/hashicorp/nomad/ci"
+	"github.com/hashicorp/nomad/helper/testlog"
 	"github.com/hashicorp/nomad/nomad/mock"
 	"github.com/hashicorp/nomad/nomad/structs"
 	"github.com/stretchr/testify/require"
@@ -32,17 +32,13 @@ func promSDTestAlloc() *structs.Allocation {
 	return alloc
 }
 
-func promSDTestLogger() hclog.Logger {
-	return hclog.NewNullLogger()
-}
-
 func TestAllocPromSDTargetGroups(t *testing.T) {
 	ci.Parallel(t)
 
 	nodeLabels := map[string]string{"__meta_nomad_node_id": "node-1"}
 	alloc := promSDTestAlloc()
 
-	groups := allocPromSDTargetGroups(alloc, nodeLabels, "", promSDTestLogger())
+	groups := allocPromSDTargetGroups(alloc, nodeLabels, "", testlog.HCLogger(t))
 	require.Len(t, groups, 2)
 
 	byPort := map[string]*PromSDTargetGroup{}
@@ -77,11 +73,11 @@ func TestAllocPromSDTargetGroups_PortFilter(t *testing.T) {
 
 	alloc := promSDTestAlloc()
 
-	groups := allocPromSDTargetGroups(alloc, nil, "metrics", promSDTestLogger())
+	groups := allocPromSDTargetGroups(alloc, nil, "metrics", testlog.HCLogger(t))
 	require.Len(t, groups, 1)
 	require.Equal(t, []string{"10.0.0.5:20002"}, groups[0].Targets)
 
-	groups = allocPromSDTargetGroups(alloc, nil, "nope", promSDTestLogger())
+	groups = allocPromSDTargetGroups(alloc, nil, "nope", testlog.HCLogger(t))
 	require.Empty(t, groups)
 }
 
@@ -102,7 +98,7 @@ func TestAllocPromSDTargetGroups_LegacyTaskNetworks(t *testing.T) {
 		},
 	}
 
-	groups := allocPromSDTargetGroups(alloc, nil, "", promSDTestLogger())
+	groups := allocPromSDTargetGroups(alloc, nil, "", testlog.HCLogger(t))
 	require.Len(t, groups, 2)
 
 	byPort := map[string]*PromSDTargetGroup{}
@@ -122,19 +118,10 @@ func TestAllocPromSDTargetGroups_SkipsIncomplete(t *testing.T) {
 		{Label: "metrics", Value: 0, HostIP: "10.0.0.5"},
 		{Label: "http", Value: 20001, HostIP: ""},
 	}
-	require.Empty(t, allocPromSDTargetGroups(alloc, nil, "", promSDTestLogger()))
+	require.Empty(t, allocPromSDTargetGroups(alloc, nil, "", testlog.HCLogger(t)))
 
 	// The same holds when the broken port is explicitly selected.
-	require.Empty(t, allocPromSDTargetGroups(alloc, nil, "http", promSDTestLogger()))
-
-	// Allocations missing job or resources are skipped entirely.
-	alloc = promSDTestAlloc()
-	alloc.Job = nil
-	require.Empty(t, allocPromSDTargetGroups(alloc, nil, "", promSDTestLogger()))
-
-	alloc = promSDTestAlloc()
-	alloc.AllocatedResources = nil
-	require.Empty(t, allocPromSDTargetGroups(alloc, nil, "", promSDTestLogger()))
+	require.Empty(t, allocPromSDTargetGroups(alloc, nil, "http", testlog.HCLogger(t)))
 }
 
 func TestAllocPromSDTargetGroups_MetaPrecedence(t *testing.T) {
@@ -149,7 +136,7 @@ func TestAllocPromSDTargetGroups_MetaPrecedence(t *testing.T) {
 		"user_id": "from-underscore",
 	}
 	for range 5 {
-		groups := allocPromSDTargetGroups(alloc, nil, "metrics", promSDTestLogger())
+		groups := allocPromSDTargetGroups(alloc, nil, "metrics", testlog.HCLogger(t))
 		require.Len(t, groups, 1)
 		require.Equal(t, "from-underscore", groups[0].Labels["__meta_nomad_meta_user_id"])
 	}
@@ -158,7 +145,7 @@ func TestAllocPromSDTargetGroups_MetaPrecedence(t *testing.T) {
 	alloc = promSDTestAlloc()
 	alloc.Job.Meta = map[string]string{"app_id": "job-level"}
 	alloc.Job.LookupTaskGroup(alloc.TaskGroup).Meta = map[string]string{"app_id": "group-level"}
-	groups := allocPromSDTargetGroups(alloc, nil, "metrics", promSDTestLogger())
+	groups := allocPromSDTargetGroups(alloc, nil, "metrics", testlog.HCLogger(t))
 	require.Len(t, groups, 1)
 	require.Equal(t, "group-level", groups[0].Labels["__meta_nomad_meta_app_id"])
 }
@@ -171,7 +158,7 @@ func TestAllocPromSDTargetGroups_MissingTaskGroup(t *testing.T) {
 	alloc := promSDTestAlloc()
 	alloc.TaskGroup = "does-not-exist"
 
-	groups := allocPromSDTargetGroups(alloc, nil, "", promSDTestLogger())
+	groups := allocPromSDTargetGroups(alloc, nil, "", testlog.HCLogger(t))
 	require.Len(t, groups, 2)
 	for _, g := range groups {
 		require.Equal(t, "github|abc", g.Labels["__meta_nomad_meta_user_id"])
@@ -191,7 +178,7 @@ func TestPromSDTargetGroupsForAllocs_StatusFilter(t *testing.T) {
 	failed.ClientStatus = structs.AllocClientStatusFailed
 
 	allocs := []*structs.Allocation{pending, running, complete, failed}
-	groups := promSDTargetGroupsForAllocs(allocs, nil, "", promSDTestLogger())
+	groups := promSDTargetGroupsForAllocs(allocs, nil, "", testlog.HCLogger(t))
 	require.Len(t, groups, 2)
 	for _, g := range groups {
 		require.Equal(t, running.ID, g.Labels["__meta_nomad_alloc_id"])
@@ -211,7 +198,7 @@ func TestPromSDTargetGroupsForAllocs_IncompleteRunningAlloc(t *testing.T) {
 	noResources.AllocatedResources = nil
 
 	allocs := []*structs.Allocation{noJob, healthy, noResources}
-	groups := promSDTargetGroupsForAllocs(allocs, nil, "", promSDTestLogger())
+	groups := promSDTargetGroupsForAllocs(allocs, nil, "", testlog.HCLogger(t))
 	require.Len(t, groups, 2)
 	for _, g := range groups {
 		require.Equal(t, healthy.ID, g.Labels["__meta_nomad_alloc_id"])
@@ -228,7 +215,7 @@ func TestPromSDTargetGroupsForAllocs_Sort(t *testing.T) {
 
 	// Feed in reverse order; output must be sorted by alloc ID then port
 	// label regardless of input order.
-	groups := promSDTargetGroupsForAllocs([]*structs.Allocation{b, a}, nil, "", promSDTestLogger())
+	groups := promSDTargetGroupsForAllocs([]*structs.Allocation{b, a}, nil, "", testlog.HCLogger(t))
 	require.Len(t, groups, 4)
 
 	var order []string
@@ -243,7 +230,7 @@ func TestPromSDTargetGroups_EmptyIsListNotNull(t *testing.T) {
 
 	// The HTTP SD contract requires a JSON list; null is a parse error in
 	// Prometheus. Empty input must produce a non-nil empty slice.
-	groups := promSDTargetGroupsForAllocs(nil, nil, "", promSDTestLogger())
+	groups := promSDTargetGroupsForAllocs(nil, nil, "", testlog.HCLogger(t))
 	require.NotNil(t, groups)
 	require.Empty(t, groups)
 }
@@ -277,6 +264,14 @@ func TestClientServiceDiscoveryRequest(t *testing.T) {
 		_, err = s.Server.ClientServiceDiscoveryRequest(respW, req)
 		require.Error(t, err)
 		require.Contains(t, err.Error(), ErrInvalidMethod)
+
+		// node_id is rejected: this endpoint serves local state only.
+		req, err = http.NewRequest(http.MethodGet, "/v1/client/service_discovery?node_id=some-node", nil)
+		require.NoError(t, err)
+		respW = httptest.NewRecorder()
+		_, err = s.Server.ClientServiceDiscoveryRequest(respW, req)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "node_id is not supported")
 
 		// GET on a node with no allocations returns an empty list.
 		req, err = http.NewRequest(http.MethodGet, "/v1/client/service_discovery", nil)

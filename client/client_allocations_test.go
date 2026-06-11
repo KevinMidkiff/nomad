@@ -39,10 +39,7 @@ func TestClient_Allocations(t *testing.T) {
 	allocOverlay := mock.Alloc()
 	allocOverlay.ClientStatus = structs.AllocClientStatusPending
 
-	// Live state has no status yet; the alloc's own status is kept. Note
-	// AllocState() never returns nil from a real alloc runner — client
-	// internals (e.g. getAllocatedResources) already rely on that — so an
-	// empty state is the weakest input worth modeling here.
+	// Live state has no status yet; the alloc's own status is kept.
 	allocEmptyState := mock.Alloc()
 	allocEmptyState.ClientStatus = structs.AllocClientStatusRunning
 

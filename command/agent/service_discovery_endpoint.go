@@ -58,6 +58,13 @@ func (s *HTTPServer) ClientServiceDiscoveryRequest(resp http.ResponseWriter, req
 		return nil, clientNotRunning
 	}
 
+	// Unlike the sibling /v1/client endpoints this handler serves local
+	// state only; reject node_id rather than silently answering for the
+	// wrong node.
+	if req.URL.Query().Get("node_id") != "" {
+		return nil, CodedError(http.StatusBadRequest, "node_id is not supported; query each client agent directly")
+	}
+
 	// Listing every allocation on the node spans namespaces, so require
 	// node:read like the other node-level client endpoints.
 	aclObj, err := s.ResolveToken(req)
@@ -124,12 +131,9 @@ func promSDTargetGroupsForAllocs(allocs []*structs.Allocation, nodeLabels map[st
 
 // allocPromSDTargetGroups builds one Prometheus SD target group per allocated
 // port of the given allocation. When portFilter is non-empty only ports whose
-// label matches are returned.
+// label matches are returned. The allocation must have a non-nil Job and
+// AllocatedResources; the caller filters and logs violations.
 func allocPromSDTargetGroups(alloc *structs.Allocation, nodeLabels map[string]string, portFilter string, logger hclog.Logger) []*PromSDTargetGroup {
-	if alloc.Job == nil || alloc.AllocatedResources == nil {
-		return nil
-	}
-
 	baseLabels := map[string]string{
 		promSDMetaLabelPrefix + "namespace":   alloc.Namespace,
 		promSDMetaLabelPrefix + "job_id":      alloc.JobID,
@@ -139,34 +143,16 @@ func allocPromSDTargetGroups(alloc *structs.Allocation, nodeLabels map[string]st
 		promSDMetaLabelPrefix + "alloc_name":  alloc.Name,
 		promSDMetaLabelPrefix + "alloc_index": strconv.FormatUint(uint64(alloc.Index()), 10),
 	}
-	for k, v := range nodeLabels {
-		baseLabels[k] = v
-	}
+	maps.Copy(baseLabels, nodeLabels)
 
 	// Expose job and task group meta (group overrides job) so schedulers
 	// embedding tenant information in meta can relabel on it. The merged
 	// keys are emitted in sorted order so that distinct keys colliding
 	// after sanitization (e.g. "user-id" and "user_id") resolve to a
 	// deterministic winner instead of flapping between polls.
-	meta := make(map[string]string, len(alloc.Job.Meta))
-	for k, v := range alloc.Job.Meta {
-		meta[k] = v
-	}
-	if tg := alloc.Job.LookupTaskGroup(alloc.TaskGroup); tg != nil {
-		for k, v := range tg.Meta {
-			meta[k] = v
-		}
-	} else {
-		logger.Debug("allocation task group not found in job during service discovery",
-			"alloc_id", alloc.ID, "job_id", alloc.JobID, "task_group", alloc.TaskGroup)
-	}
+	meta := alloc.Job.CombinedTaskMeta(alloc.TaskGroup, "")
 	for _, k := range slices.Sorted(maps.Keys(meta)) {
-		name := promSDMetaLabelPrefix + "meta_" + promSDSafeLabelName(k)
-		if _, collision := baseLabels[name]; collision {
-			logger.Debug("duplicate meta label after sanitization in service discovery",
-				"alloc_id", alloc.ID, "key", k, "label", name)
-		}
-		baseLabels[name] = meta[k]
+		baseLabels[promSDMetaLabelPrefix+"meta_"+promSDSafeLabelName(k)] = meta[k]
 	}
 
 	var groups []*PromSDTargetGroup
@@ -180,9 +166,7 @@ func allocPromSDTargetGroups(alloc *structs.Allocation, nodeLabels map[string]st
 			return
 		}
 		labels := make(map[string]string, len(baseLabels)+3)
-		for k, v := range baseLabels {
-			labels[k] = v
-		}
+		maps.Copy(labels, baseLabels)
 		labels[promSDMetaLabelPrefix+"address"] = hostIP
 		labels[promSDMetaLabelPrefix+"port_label"] = label
 		labels[promSDMetaLabelPrefix+"port"] = strconv.Itoa(value)
@@ -215,8 +199,8 @@ func allocPromSDTargetGroups(alloc *structs.Allocation, nodeLabels map[string]st
 	return groups
 }
 
-// promSDSafeLabelName rewrites s so it is usable inside a Prometheus label
-// name, replacing every invalid character with an underscore.
+// promSDSafeLabelName replaces every character not allowed in a Prometheus
+// label name with an underscore.
 func promSDSafeLabelName(s string) string {
 	return promSDInvalidLabelChars.ReplaceAllString(s, "_")
 }

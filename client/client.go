@@ -1460,7 +1460,7 @@ func (c *Client) Allocations() []*structs.Allocation {
 			continue
 		}
 		alloc := ar.Alloc().Copy()
-		if state := ar.AllocState(); state != nil && state.ClientStatus != "" {
+		if state := ar.AllocState(); state.ClientStatus != "" {
 			alloc.ClientStatus = state.ClientStatus
 		}
 		out = append(out, alloc)
