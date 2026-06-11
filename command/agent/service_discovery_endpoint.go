@@ -5,11 +5,14 @@ package agent
 
 import (
 	"fmt"
+	"maps"
 	"net/http"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 
+	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/nomad/nomad/structs"
 )
 
@@ -36,6 +39,11 @@ type PromSDTargetGroup struct {
 // emitted per allocated port of every running allocation, so scrapers can
 // select ports via the __meta_nomad_port_label label or the ?port= query
 // parameter (e.g. ?port=metrics).
+//
+// Note that an unknown ?port= value is indistinguishable from "no matching
+// allocations" and yields a successful empty response, which makes Prometheus
+// drop all targets discovered from this endpoint. Scrape configurations
+// should pair this endpoint with an absent-targets alert.
 //
 // This endpoint only serves local client state and is intended to be queried
 // directly on each client agent, fanning scrape-target discovery out to the
@@ -71,32 +79,53 @@ func (s *HTTPServer) ClientServiceDiscoveryRequest(resp http.ResponseWriter, req
 		promSDMetaLabelPrefix + "node_datacenter": node.Datacenter,
 	}
 
+	return promSDTargetGroupsForAllocs(client.Allocations(), nodeLabels, portFilter, s.logger), nil
+}
+
+// promSDTargetGroupsForAllocs builds a deterministically ordered list of
+// Prometheus SD target groups for the running allocations in allocs. The
+// returned slice is never nil so an empty result encodes as the JSON list
+// required by the HTTP SD contract rather than null.
+func promSDTargetGroupsForAllocs(allocs []*structs.Allocation, nodeLabels map[string]string, portFilter string, logger hclog.Logger) []*PromSDTargetGroup {
 	groups := make([]*PromSDTargetGroup, 0)
-	for _, alloc := range client.Allocations() {
+	for _, alloc := range allocs {
 		if alloc.ClientStatus != structs.AllocClientStatusRunning {
 			continue
 		}
-		groups = append(groups, allocPromSDTargetGroups(alloc, nodeLabels, portFilter)...)
+		// A running allocation always carries its job and allocated
+		// resources; their absence means corrupted client state. Skip
+		// the allocation but say so, because its targets silently
+		// disappearing from a successful response is otherwise
+		// undebuggable.
+		if alloc.Job == nil || alloc.AllocatedResources == nil {
+			logger.Warn("skipping running allocation with incomplete state in service discovery",
+				"alloc_id", alloc.ID, "job_id", alloc.JobID,
+				"has_job", alloc.Job != nil, "has_resources", alloc.AllocatedResources != nil)
+			continue
+		}
+		groups = append(groups, allocPromSDTargetGroups(alloc, nodeLabels, portFilter, logger)...)
 	}
 
-	// Sort for a deterministic response body.
+	// Sort for a deterministic response body. The port value breaks ties
+	// between duplicate port labels (possible across legacy task networks).
 	sort.Slice(groups, func(i, j int) bool {
 		gi, gj := groups[i], groups[j]
-		ai := gi.Labels[promSDMetaLabelPrefix+"alloc_id"]
-		aj := gj.Labels[promSDMetaLabelPrefix+"alloc_id"]
-		if ai != aj {
-			return ai < aj
+		if a, b := gi.Labels[promSDMetaLabelPrefix+"alloc_id"], gj.Labels[promSDMetaLabelPrefix+"alloc_id"]; a != b {
+			return a < b
 		}
-		return gi.Labels[promSDMetaLabelPrefix+"port_label"] < gj.Labels[promSDMetaLabelPrefix+"port_label"]
+		if a, b := gi.Labels[promSDMetaLabelPrefix+"port_label"], gj.Labels[promSDMetaLabelPrefix+"port_label"]; a != b {
+			return a < b
+		}
+		return gi.Labels[promSDMetaLabelPrefix+"port"] < gj.Labels[promSDMetaLabelPrefix+"port"]
 	})
 
-	return groups, nil
+	return groups
 }
 
 // allocPromSDTargetGroups builds one Prometheus SD target group per allocated
 // port of the given allocation. When portFilter is non-empty only ports whose
 // label matches are returned.
-func allocPromSDTargetGroups(alloc *structs.Allocation, nodeLabels map[string]string, portFilter string) []*PromSDTargetGroup {
+func allocPromSDTargetGroups(alloc *structs.Allocation, nodeLabels map[string]string, portFilter string, logger hclog.Logger) []*PromSDTargetGroup {
 	if alloc.Job == nil || alloc.AllocatedResources == nil {
 		return nil
 	}
@@ -115,14 +144,29 @@ func allocPromSDTargetGroups(alloc *structs.Allocation, nodeLabels map[string]st
 	}
 
 	// Expose job and task group meta (group overrides job) so schedulers
-	// embedding tenant information in meta can relabel on it.
+	// embedding tenant information in meta can relabel on it. The merged
+	// keys are emitted in sorted order so that distinct keys colliding
+	// after sanitization (e.g. "user-id" and "user_id") resolve to a
+	// deterministic winner instead of flapping between polls.
+	meta := make(map[string]string, len(alloc.Job.Meta))
 	for k, v := range alloc.Job.Meta {
-		baseLabels[promSDMetaLabelPrefix+"meta_"+promSDSafeLabelName(k)] = v
+		meta[k] = v
 	}
 	if tg := alloc.Job.LookupTaskGroup(alloc.TaskGroup); tg != nil {
 		for k, v := range tg.Meta {
-			baseLabels[promSDMetaLabelPrefix+"meta_"+promSDSafeLabelName(k)] = v
+			meta[k] = v
 		}
+	} else {
+		logger.Debug("allocation task group not found in job during service discovery",
+			"alloc_id", alloc.ID, "job_id", alloc.JobID, "task_group", alloc.TaskGroup)
+	}
+	for _, k := range slices.Sorted(maps.Keys(meta)) {
+		name := promSDMetaLabelPrefix + "meta_" + promSDSafeLabelName(k)
+		if _, collision := baseLabels[name]; collision {
+			logger.Debug("duplicate meta label after sanitization in service discovery",
+				"alloc_id", alloc.ID, "key", k, "label", name)
+		}
+		baseLabels[name] = meta[k]
 	}
 
 	var groups []*PromSDTargetGroup
@@ -131,6 +175,8 @@ func allocPromSDTargetGroups(alloc *structs.Allocation, nodeLabels map[string]st
 			return
 		}
 		if hostIP == "" || value <= 0 {
+			logger.Debug("skipping allocated port without scrapeable address in service discovery",
+				"alloc_id", alloc.ID, "port_label", label, "host_ip", hostIP, "port", value)
 			return
 		}
 		labels := make(map[string]string, len(baseLabels)+3)

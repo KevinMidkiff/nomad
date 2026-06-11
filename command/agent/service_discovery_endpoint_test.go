@@ -4,10 +4,15 @@
 package agent
 
 import (
+	"bytes"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
+	"github.com/hashicorp/go-hclog"
+	"github.com/hashicorp/go-msgpack/v2/codec"
+	"github.com/hashicorp/nomad/acl"
 	"github.com/hashicorp/nomad/ci"
 	"github.com/hashicorp/nomad/nomad/mock"
 	"github.com/hashicorp/nomad/nomad/structs"
@@ -27,13 +32,17 @@ func promSDTestAlloc() *structs.Allocation {
 	return alloc
 }
 
+func promSDTestLogger() hclog.Logger {
+	return hclog.NewNullLogger()
+}
+
 func TestAllocPromSDTargetGroups(t *testing.T) {
 	ci.Parallel(t)
 
 	nodeLabels := map[string]string{"__meta_nomad_node_id": "node-1"}
 	alloc := promSDTestAlloc()
 
-	groups := allocPromSDTargetGroups(alloc, nodeLabels, "")
+	groups := allocPromSDTargetGroups(alloc, nodeLabels, "", promSDTestLogger())
 	require.Len(t, groups, 2)
 
 	byPort := map[string]*PromSDTargetGroup{}
@@ -68,11 +77,11 @@ func TestAllocPromSDTargetGroups_PortFilter(t *testing.T) {
 
 	alloc := promSDTestAlloc()
 
-	groups := allocPromSDTargetGroups(alloc, nil, "metrics")
+	groups := allocPromSDTargetGroups(alloc, nil, "metrics", promSDTestLogger())
 	require.Len(t, groups, 1)
 	require.Equal(t, []string{"10.0.0.5:20002"}, groups[0].Targets)
 
-	groups = allocPromSDTargetGroups(alloc, nil, "nope")
+	groups = allocPromSDTargetGroups(alloc, nil, "nope", promSDTestLogger())
 	require.Empty(t, groups)
 }
 
@@ -93,7 +102,7 @@ func TestAllocPromSDTargetGroups_LegacyTaskNetworks(t *testing.T) {
 		},
 	}
 
-	groups := allocPromSDTargetGroups(alloc, nil, "")
+	groups := allocPromSDTargetGroups(alloc, nil, "", promSDTestLogger())
 	require.Len(t, groups, 2)
 
 	byPort := map[string]*PromSDTargetGroup{}
@@ -113,16 +122,149 @@ func TestAllocPromSDTargetGroups_SkipsIncomplete(t *testing.T) {
 		{Label: "metrics", Value: 0, HostIP: "10.0.0.5"},
 		{Label: "http", Value: 20001, HostIP: ""},
 	}
-	require.Empty(t, allocPromSDTargetGroups(alloc, nil, ""))
+	require.Empty(t, allocPromSDTargetGroups(alloc, nil, "", promSDTestLogger()))
+
+	// The same holds when the broken port is explicitly selected.
+	require.Empty(t, allocPromSDTargetGroups(alloc, nil, "http", promSDTestLogger()))
 
 	// Allocations missing job or resources are skipped entirely.
 	alloc = promSDTestAlloc()
 	alloc.Job = nil
-	require.Empty(t, allocPromSDTargetGroups(alloc, nil, ""))
+	require.Empty(t, allocPromSDTargetGroups(alloc, nil, "", promSDTestLogger()))
 
 	alloc = promSDTestAlloc()
 	alloc.AllocatedResources = nil
-	require.Empty(t, allocPromSDTargetGroups(alloc, nil, ""))
+	require.Empty(t, allocPromSDTargetGroups(alloc, nil, "", promSDTestLogger()))
+}
+
+func TestAllocPromSDTargetGroups_MetaPrecedence(t *testing.T) {
+	ci.Parallel(t)
+
+	// Distinct keys that sanitize to the same label name resolve to a
+	// deterministic winner: keys are emitted in sorted order, so the last
+	// sorted key wins ("user_id" sorts after "user-id").
+	alloc := promSDTestAlloc()
+	alloc.Job.Meta = map[string]string{
+		"user-id": "from-dash",
+		"user_id": "from-underscore",
+	}
+	for range 5 {
+		groups := allocPromSDTargetGroups(alloc, nil, "metrics", promSDTestLogger())
+		require.Len(t, groups, 1)
+		require.Equal(t, "from-underscore", groups[0].Labels["__meta_nomad_meta_user_id"])
+	}
+
+	// Task group meta overrides job meta for the same key.
+	alloc = promSDTestAlloc()
+	alloc.Job.Meta = map[string]string{"app_id": "job-level"}
+	alloc.Job.LookupTaskGroup(alloc.TaskGroup).Meta = map[string]string{"app_id": "group-level"}
+	groups := allocPromSDTargetGroups(alloc, nil, "metrics", promSDTestLogger())
+	require.Len(t, groups, 1)
+	require.Equal(t, "group-level", groups[0].Labels["__meta_nomad_meta_app_id"])
+}
+
+func TestAllocPromSDTargetGroups_MissingTaskGroup(t *testing.T) {
+	ci.Parallel(t)
+
+	// An allocation whose task group cannot be found in its job still
+	// yields targets; only the group meta labels are absent.
+	alloc := promSDTestAlloc()
+	alloc.TaskGroup = "does-not-exist"
+
+	groups := allocPromSDTargetGroups(alloc, nil, "", promSDTestLogger())
+	require.Len(t, groups, 2)
+	for _, g := range groups {
+		require.Equal(t, "github|abc", g.Labels["__meta_nomad_meta_user_id"])
+		require.NotContains(t, g.Labels, "__meta_nomad_meta_app_id")
+	}
+}
+
+func TestPromSDTargetGroupsForAllocs_StatusFilter(t *testing.T) {
+	ci.Parallel(t)
+
+	running := promSDTestAlloc()
+	pending := promSDTestAlloc()
+	pending.ClientStatus = structs.AllocClientStatusPending
+	complete := promSDTestAlloc()
+	complete.ClientStatus = structs.AllocClientStatusComplete
+	failed := promSDTestAlloc()
+	failed.ClientStatus = structs.AllocClientStatusFailed
+
+	allocs := []*structs.Allocation{pending, running, complete, failed}
+	groups := promSDTargetGroupsForAllocs(allocs, nil, "", promSDTestLogger())
+	require.Len(t, groups, 2)
+	for _, g := range groups {
+		require.Equal(t, running.ID, g.Labels["__meta_nomad_alloc_id"])
+	}
+}
+
+func TestPromSDTargetGroupsForAllocs_IncompleteRunningAlloc(t *testing.T) {
+	ci.Parallel(t)
+
+	// A running allocation with corrupted state (nil Job or resources)
+	// is skipped without affecting healthy allocations and without
+	// panicking.
+	healthy := promSDTestAlloc()
+	noJob := promSDTestAlloc()
+	noJob.Job = nil
+	noResources := promSDTestAlloc()
+	noResources.AllocatedResources = nil
+
+	allocs := []*structs.Allocation{noJob, healthy, noResources}
+	groups := promSDTargetGroupsForAllocs(allocs, nil, "", promSDTestLogger())
+	require.Len(t, groups, 2)
+	for _, g := range groups {
+		require.Equal(t, healthy.ID, g.Labels["__meta_nomad_alloc_id"])
+	}
+}
+
+func TestPromSDTargetGroupsForAllocs_Sort(t *testing.T) {
+	ci.Parallel(t)
+
+	a := promSDTestAlloc()
+	a.ID = "aaaaaaaa-0000-0000-0000-000000000000"
+	b := promSDTestAlloc()
+	b.ID = "bbbbbbbb-0000-0000-0000-000000000000"
+
+	// Feed in reverse order; output must be sorted by alloc ID then port
+	// label regardless of input order.
+	groups := promSDTargetGroupsForAllocs([]*structs.Allocation{b, a}, nil, "", promSDTestLogger())
+	require.Len(t, groups, 4)
+
+	var order []string
+	for _, g := range groups {
+		order = append(order, g.Labels["__meta_nomad_alloc_id"][:8]+"/"+g.Labels["__meta_nomad_port_label"])
+	}
+	require.Equal(t, []string{"aaaaaaaa/http", "aaaaaaaa/metrics", "bbbbbbbb/http", "bbbbbbbb/metrics"}, order)
+}
+
+func TestPromSDTargetGroups_EmptyIsListNotNull(t *testing.T) {
+	ci.Parallel(t)
+
+	// The HTTP SD contract requires a JSON list; null is a parse error in
+	// Prometheus. Empty input must produce a non-nil empty slice.
+	groups := promSDTargetGroupsForAllocs(nil, nil, "", promSDTestLogger())
+	require.NotNil(t, groups)
+	require.Empty(t, groups)
+}
+
+func TestPromSDTargetGroup_WireFormat(t *testing.T) {
+	ci.Parallel(t)
+
+	// The agent serializes responses with go-codec, which honors the json
+	// struct tags as a fallback. Prometheus requires lowercase
+	// "targets"/"labels" keys; lock the wire format in.
+	group := &PromSDTargetGroup{
+		Targets: []string{"10.0.0.5:20002"},
+		Labels:  map[string]string{"__meta_nomad_port_label": "metrics"},
+	}
+	var buf bytes.Buffer
+	require.NoError(t, codec.NewEncoder(&buf, structs.JsonHandleWithExtensions).Encode(group))
+	out := buf.String()
+	require.Contains(t, out, `"targets"`)
+	require.Contains(t, out, `"labels"`)
+	require.NotContains(t, out, `"Targets"`)
+	require.NotContains(t, out, `"Labels"`)
 }
 
 func TestClientServiceDiscoveryRequest(t *testing.T) {
@@ -148,6 +290,23 @@ func TestClientServiceDiscoveryRequest(t *testing.T) {
 	})
 }
 
+func TestClientServiceDiscoveryRequest_WireFormat(t *testing.T) {
+	ci.Parallel(t)
+	httpTest(t, nil, func(s *TestAgent) {
+		// Drive the full mux + wrap path so status code, content type,
+		// and the empty-body shape are asserted on the actual bytes
+		// Prometheus would receive.
+		req, err := http.NewRequest(http.MethodGet, "/v1/client/service_discovery", nil)
+		require.NoError(t, err)
+		respW := httptest.NewRecorder()
+		s.Server.mux.ServeHTTP(respW, req)
+
+		require.Equal(t, http.StatusOK, respW.Code)
+		require.Equal(t, "application/json", respW.Result().Header.Get("Content-Type"))
+		require.Equal(t, "[]", strings.TrimSpace(respW.Body.String()))
+	})
+}
+
 func TestClientServiceDiscoveryRequest_NoClient(t *testing.T) {
 	ci.Parallel(t)
 	httpTest(t, nil, func(s *TestAgent) {
@@ -161,5 +320,57 @@ func TestClientServiceDiscoveryRequest_NoClient(t *testing.T) {
 		_, err = s.Server.ClientServiceDiscoveryRequest(respW, req)
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "not running a Nomad Client")
+	})
+}
+
+func TestClientServiceDiscoveryRequest_ACL(t *testing.T) {
+	ci.Parallel(t)
+	httpACLTest(t, nil, func(s *TestAgent) {
+		state := s.Agent.server.State()
+
+		// Without a token the request is denied.
+		{
+			req, err := http.NewRequest(http.MethodGet, "/v1/client/service_discovery", nil)
+			require.NoError(t, err)
+			respW := httptest.NewRecorder()
+			_, err = s.Server.ClientServiceDiscoveryRequest(respW, req)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), structs.ErrPermissionDenied.Error())
+		}
+
+		// A token without node:read is denied.
+		{
+			req, err := http.NewRequest(http.MethodGet, "/v1/client/service_discovery", nil)
+			require.NoError(t, err)
+			token := mock.CreatePolicyAndToken(t, state, 1005, "invalid", mock.NodePolicy(acl.PolicyDeny))
+			setToken(req, token)
+			respW := httptest.NewRecorder()
+			_, err = s.Server.ClientServiceDiscoveryRequest(respW, req)
+			require.Error(t, err)
+			require.Equal(t, structs.ErrPermissionDenied.Error(), err.Error())
+		}
+
+		// A token with node:read is allowed.
+		{
+			req, err := http.NewRequest(http.MethodGet, "/v1/client/service_discovery", nil)
+			require.NoError(t, err)
+			token := mock.CreatePolicyAndToken(t, state, 1007, "valid", mock.NodePolicy(acl.PolicyRead))
+			setToken(req, token)
+			respW := httptest.NewRecorder()
+			obj, err := s.Server.ClientServiceDiscoveryRequest(respW, req)
+			require.NoError(t, err)
+			require.NotNil(t, obj)
+		}
+
+		// A management token is allowed.
+		{
+			req, err := http.NewRequest(http.MethodGet, "/v1/client/service_discovery", nil)
+			require.NoError(t, err)
+			setToken(req, s.RootToken)
+			respW := httptest.NewRecorder()
+			obj, err := s.Server.ClientServiceDiscoveryRequest(respW, req)
+			require.NoError(t, err)
+			require.NotNil(t, obj)
+		}
 	})
 }
