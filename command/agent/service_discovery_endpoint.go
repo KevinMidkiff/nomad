@@ -4,8 +4,8 @@
 package agent
 
 import (
-	"fmt"
 	"maps"
+	"net"
 	"net/http"
 	"regexp"
 	"slices"
@@ -171,7 +171,8 @@ func allocPromSDTargetGroups(alloc *structs.Allocation, nodeLabels map[string]st
 		labels[promSDMetaLabelPrefix+"port_label"] = label
 		labels[promSDMetaLabelPrefix+"port"] = strconv.Itoa(value)
 		groups = append(groups, &PromSDTargetGroup{
-			Targets: []string{fmt.Sprintf("%s:%d", hostIP, value)},
+			// JoinHostPort brackets IPv6 host IPs as Prometheus requires.
+			Targets: []string{net.JoinHostPort(hostIP, strconv.Itoa(value))},
 			Labels:  labels,
 		})
 	}
