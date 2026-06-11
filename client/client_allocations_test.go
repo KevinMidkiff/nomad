@@ -1,6 +1,3 @@
-// Copyright (c) HashiCorp, Inc.
-// SPDX-License-Identifier: BUSL-1.1
-
 package client
 
 import (
@@ -43,7 +40,7 @@ func TestClient_Allocations(t *testing.T) {
 	allocEmptyState := mock.Alloc()
 	allocEmptyState.ClientStatus = structs.AllocClientStatusRunning
 
-	// Destroyed runners are excluded entirely.
+	// Destroyed alloc runners are excluded entirely.
 	allocDestroyed := mock.Alloc()
 
 	c.allocLock.Lock()
@@ -57,7 +54,7 @@ func TestClient_Allocations(t *testing.T) {
 			rawState: &state.State{},
 		},
 		// Client background goroutines (e.g. emitStats) call AllocState()
-		// on every runner, destroyed or not, so the state must be non-nil.
+		// on every alloc runner, destroyed or not, so the state must be non-nil.
 		allocDestroyed.ID: &fakeSnapshotAllocRunner{
 			rawAlloc:  allocDestroyed,
 			rawState:  &state.State{ClientStatus: structs.AllocClientStatusComplete},
@@ -78,11 +75,11 @@ func TestClient_Allocations(t *testing.T) {
 	require.Equal(t, structs.AllocClientStatusRunning, byID[allocOverlay.ID].ClientStatus)
 	// An empty live status leaves the alloc's own status untouched.
 	require.Equal(t, structs.AllocClientStatusRunning, byID[allocEmptyState.ID].ClientStatus)
-	// Destroyed runner is excluded.
+	// Destroyed alloc runner is excluded.
 	require.NotContains(t, byID, allocDestroyed.ID)
 
 	// Returned allocations are copies: mutating them must not write
-	// through to the runner's allocation.
+	// through to the alloc runner's allocation.
 	byID[allocOverlay.ID].ClientStatus = "mutated"
 	require.Equal(t, structs.AllocClientStatusPending, allocOverlay.ClientStatus)
 }
