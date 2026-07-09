@@ -1324,7 +1324,20 @@ func (iter *PreemptionScoringIterator) Next() *RankedNode {
 		return option
 	}
 
-	netPriority := netPriority(option.PreemptedAllocs)
+	// Greedy evictions are zero-cost: greedy allocs were masked from bin-pack
+	// accounting, so the node was already scored as if they weren't present.
+	// Rewarding their eviction here (preemptionScore is ~1 for low-priority
+	// victims) would double-count and bias placement toward greedy-occupied
+	// nodes — including over eviction-free nodes — because greedy masking runs
+	// in the first scheduling pass rather than a separate preemption fallback.
+	// Score only the non-greedy victims; if every victim is greedy, add
+	// nothing so the node is ranked as if empty.
+	nonGreedy, _ := splitGreedy(option.PreemptedAllocs)
+	if len(nonGreedy) == 0 {
+		return option
+	}
+
+	netPriority := netPriority(nonGreedy)
 	// preemption score is inversely proportional to netPriority
 	preemptionScore := preemptionScore(netPriority)
 	option.Scores = append(option.Scores, preemptionScore)
@@ -1344,6 +1357,13 @@ func netPriority(allocs []*structs.Allocation) float64 {
 			max = float64(alloc.Job.Priority)
 		}
 		sumPriority += alloc.Job.Priority
+	}
+	// An empty set or an all-zero-priority set has no preemption cost. Guard
+	// the division below, which would otherwise be 0/0 = NaN and poison the
+	// node's final score. (Real jobs are canonicalized to priority >= 1, so
+	// this is defensive.)
+	if max == 0 {
+		return 0
 	}
 	// We use the maximum priority across all allocations
 	// with an additional penalty that increases proportional to the

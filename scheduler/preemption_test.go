@@ -2106,13 +2106,7 @@ func TestPreemption_Greedy_ScoringNotAffectedByGreedyPresence(t *testing.T) {
 	plan := h.Plans[0]
 
 	// Find the placed alloc to inspect its Metrics.
-	var placed *structs.Allocation
-	for _, allocs := range plan.NodeAllocation {
-		if len(allocs) > 0 {
-			placed = allocs[0]
-			break
-		}
-	}
+	placed := firstPlacedAlloc(plan)
 	must.NotNil(t, placed)
 	must.NotNil(t, placed.Metrics)
 
@@ -2194,13 +2188,7 @@ func TestPreemption_Greedy_ScoringIgnoresKeptGreedyCPU(t *testing.T) {
 	plan := h.Plans[0]
 
 	// Find the placed alloc to inspect its Metrics.
-	var placed *structs.Allocation
-	for _, allocs := range plan.NodeAllocation {
-		if len(allocs) > 0 {
-			placed = allocs[0]
-			break
-		}
-	}
+	placed := firstPlacedAlloc(plan)
 	must.NotNil(t, placed)
 	must.NotNil(t, placed.Metrics)
 
@@ -2333,6 +2321,99 @@ func TestPreemption_Greedy_NodeMaxAllocsAllGreedyEvictedWhenStillOver(t *testing
 	}
 }
 
+// TestPreemption_Greedy_EvictionEarnsNoPreemptionReward verifies the zero-cost
+// invariant on the preemption scorer: evicting a masked greedy alloc must not
+// add a preemption reward to the node's score. The upstream
+// PreemptionScoringIterator rewards low-priority evictions with a score near
+// 1, which — because greedy masking runs in the first scheduling pass rather
+// than a separate preemption fallback — would structurally bias placement
+// toward greedy-occupied nodes. A greedy-only eviction must therefore record
+// no "preemption" score at all.
+func TestPreemption_Greedy_EvictionEarnsNoPreemptionReward(t *testing.T) {
+	ci.Parallel(t)
+	h := NewHarness(t)
+
+	node := greedyGPUNode(t, 1)
+	must.NoError(t, h.State.UpsertNode(structs.MsgTypeTestSetup, h.NextIndex(), node))
+	enableGreedyPreemption(t, h, structs.PreemptionConfig{})
+
+	// Greedy alloc (priority 1) holds the only GPU. Under masking it is
+	// invisible to device accounting, so the incoming alloc claims the GPU
+	// and evicts this greedy holder.
+	greedyJob := greedyGPUJob(1, true)
+	must.NoError(t, h.State.UpsertJob(structs.MsgTypeTestSetup, h.NextIndex(), nil, greedyJob))
+	greedyAlloc := createAllocWithDevice(uuid.Generate(), greedyJob, greedyJob.TaskGroups[0].Tasks[0].Resources,
+		&structs.AllocatedDeviceResource{Type: "gpu", Vendor: "nvidia", Name: "1080ti", DeviceIDs: []string{"dev0"}})
+	greedyAlloc.NodeID = node.ID
+	must.NoError(t, h.State.UpsertAllocs(structs.MsgTypeTestSetup, h.NextIndex(), []*structs.Allocation{greedyAlloc}))
+
+	newJob := greedyGPUJob(50, false)
+	runJobEval(t, h, newJob)
+
+	must.Len(t, 1, h.Plans)
+	plan := h.Plans[0]
+
+	// The greedy holder must have been evicted to free its GPU.
+	preempted := plan.NodePreemptions[node.ID]
+	must.Len(t, 1, preempted)
+	must.Eq(t, greedyAlloc.ID, preempted[0].ID)
+
+	// But that eviction must not have earned a preemption reward.
+	placed := firstPlacedAlloc(plan)
+	must.NotNil(t, placed)
+	must.NotNil(t, placed.Metrics)
+	_, hasPreempt := scoreForNode(placed.Metrics, node.ID, "preemption")
+	must.False(t, hasPreempt,
+		must.Sprintf("greedy eviction must not record a preemption reward; scores: %+v",
+			placed.Metrics.ScoreMetaData))
+}
+
+// TestPreemption_Greedy_NeutralPrefersEvictionFreeNode verifies the
+// behavioral consequence of zero-cost scoring: given a node with a free GPU
+// (no eviction needed) and a node whose only GPU is held by a greedy alloc,
+// the scheduler prefers the eviction-free node rather than being lured into
+// evicting greedy by the preemption reward. Node A carries a small non-greedy
+// filler so it is a marginally better bin-pack fit; without the fix, node B's
+// preemption reward overpowers that edge and placement lands on B.
+func TestPreemption_Greedy_NeutralPrefersEvictionFreeNode(t *testing.T) {
+	ci.Parallel(t)
+	h := NewHarness(t)
+
+	nodeA := greedyGPUNode(t, 1) // free GPU, eviction-free
+	nodeB := greedyGPUNode(t, 1) // GPU held by a greedy alloc
+	must.NoError(t, h.State.UpsertNode(structs.MsgTypeTestSetup, h.NextIndex(), nodeA))
+	must.NoError(t, h.State.UpsertNode(structs.MsgTypeTestSetup, h.NextIndex(), nodeB))
+	enableGreedyPreemption(t, h, structs.PreemptionConfig{})
+
+	// Small non-greedy filler on A makes it a marginally denser (better)
+	// bin-pack fit. It is not a preemption candidate (same priority, no
+	// general preemption configured).
+	fillerJob := nonGPUJob(50, false, 1000, 512)
+	must.NoError(t, h.State.UpsertJob(structs.MsgTypeTestSetup, h.NextIndex(), nil, fillerJob))
+	fillerAlloc := createAlloc(uuid.Generate(), fillerJob, fillerJob.TaskGroups[0].Tasks[0].Resources)
+	fillerAlloc.NodeID = nodeA.ID
+
+	// Greedy alloc (priority 1) holds B's GPU.
+	greedyJob := greedyGPUJob(1, true)
+	must.NoError(t, h.State.UpsertJob(structs.MsgTypeTestSetup, h.NextIndex(), nil, greedyJob))
+	greedyAlloc := createAllocWithDevice(uuid.Generate(), greedyJob, greedyJob.TaskGroups[0].Tasks[0].Resources,
+		&structs.AllocatedDeviceResource{Type: "gpu", Vendor: "nvidia", Name: "1080ti", DeviceIDs: []string{"dev0"}})
+	greedyAlloc.NodeID = nodeB.ID
+
+	must.NoError(t, h.State.UpsertAllocs(structs.MsgTypeTestSetup, h.NextIndex(), []*structs.Allocation{fillerAlloc, greedyAlloc}))
+
+	newJob := greedyGPUJob(50, false)
+	runJobEval(t, h, newJob)
+
+	must.Len(t, 1, h.Plans)
+	plan := h.Plans[0]
+	must.MapContainsKey(t, plan.NodeAllocation, nodeA.ID,
+		must.Sprintf("expected placement on eviction-free node A, but plan landed on %v",
+			mapKeys(plan.NodeAllocation)))
+	must.Len(t, 0, plan.NodePreemptions[nodeB.ID],
+		must.Sprintf("must not evict greedy on B when an eviction-free node is available"))
+}
+
 // nonGPUJob builds a job (greedy or non-greedy) that asks only for CPU and
 // memory, with no devices or networks. Used to build filler non-greedy
 // load, low-priority preemption victims, and CPU-only greedy allocs in
@@ -2381,13 +2462,31 @@ func mustPlanApplierFit(t *testing.T, node *structs.Node, plan *structs.Plan, ex
 
 // binpackScoreForNode returns the binpack score for the given node from a
 // metric's ScoreMetaData, plus a bool indicating whether the entry exists.
-func binpackScoreForNode(m *structs.AllocMetric, nodeID string) (float64, bool) {
+// scoreForNode returns the named scorer's value for a node and whether that
+// scorer recorded a score (the bool reflects key presence).
+func scoreForNode(m *structs.AllocMetric, nodeID, key string) (float64, bool) {
 	for _, sm := range m.ScoreMetaData {
 		if sm.NodeID == nodeID {
-			return sm.Scores["binpack"], true
+			v, ok := sm.Scores[key]
+			return v, ok
 		}
 	}
 	return 0, false
+}
+
+func binpackScoreForNode(m *structs.AllocMetric, nodeID string) (float64, bool) {
+	return scoreForNode(m, nodeID, "binpack")
+}
+
+// firstPlacedAlloc returns any one placed alloc from the plan, for inspecting
+// its scoring Metrics.
+func firstPlacedAlloc(plan *structs.Plan) *structs.Allocation {
+	for _, allocs := range plan.NodeAllocation {
+		if len(allocs) > 0 {
+			return allocs[0]
+		}
+	}
+	return nil
 }
 
 // mapKeys returns the keys of a map (useful for diagnostic must.Sprintf

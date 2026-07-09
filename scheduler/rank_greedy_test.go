@@ -8,6 +8,7 @@ import (
 
 	"github.com/hashicorp/nomad/ci"
 	"github.com/hashicorp/nomad/helper/uuid"
+	"github.com/hashicorp/nomad/nomad/mock"
 	"github.com/hashicorp/nomad/nomad/structs"
 	"github.com/shoenig/test/must"
 )
@@ -411,4 +412,57 @@ func TestEnforceNodeMaxAllocs_OverBudgetEvenAfterAllGreedy(t *testing.T) {
 	kept, extra := enforceNodeMaxAllocs(node, []*structs.Allocation{n1, n2}, []*structs.Allocation{g}, 1)
 	must.Len(t, 0, kept, must.Sprintf("all kept-greedy evicted when budget cannot be met"))
 	must.Len(t, 1, extra)
+}
+
+// TestPreemptionScoring_GreedyVictimsAreZeroCost verifies that the
+// PreemptionScoringIterator treats greedy evictions as zero-cost: greedy
+// victims must not contribute a preemption reward (they were already masked
+// from bin-pack scoring). Only non-greedy victims are scored, and when every
+// victim is greedy no preemption score is appended at all.
+func TestPreemptionScoring_GreedyVictimsAreZeroCost(t *testing.T) {
+	ci.Parallel(t)
+
+	greedy1 := newGreedyTestAlloc(t, true, nil)
+	greedy2 := newGreedyTestAlloc(t, true, nil)
+	nonGreedy := newGreedyTestAlloc(t, false, nil) // Priority 50
+
+	cases := []struct {
+		name      string
+		preempted []*structs.Allocation
+		wantScore bool
+	}{
+		{"all greedy", []*structs.Allocation{greedy1, greedy2}, false},
+		{"mixed", []*structs.Allocation{greedy1, nonGreedy}, true},
+		{"all non-greedy", []*structs.Allocation{nonGreedy}, true},
+		{"none", nil, false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, ctx := testContext(t)
+			option := &RankedNode{Node: mock.Node(), PreemptedAllocs: tc.preempted}
+			static := NewStaticRankIterator(ctx, []*RankedNode{option})
+			scorer := NewPreemptionScoringIterator(ctx, static)
+
+			out := scorer.Next()
+			must.NotNil(t, out)
+			if tc.wantScore {
+				must.Len(t, 1, out.Scores)
+				must.Greater(t, 0.0, out.Scores[0])
+			} else {
+				must.Len(t, 0, out.Scores)
+			}
+		})
+	}
+}
+
+// TestNetPriority_AllZeroPriorityIsZero guards the max+sum/max division in
+// netPriority: an all-zero-priority (or empty) set must return 0 rather than
+// NaN, which would otherwise poison a node's final score. Defensive — real
+// jobs are canonicalized to priority >= 1.
+func TestNetPriority_AllZeroPriorityIsZero(t *testing.T) {
+	ci.Parallel(t)
+	zero := &structs.Allocation{Job: &structs.Job{Priority: 0}}
+	must.Eq(t, 0.0, netPriority([]*structs.Allocation{zero, zero}))
+	must.Eq(t, 0.0, netPriority(nil))
 }
